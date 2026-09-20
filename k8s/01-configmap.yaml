@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gemini-live-bridge-config
+  namespace: gemini-bridge
+data:
+  QUARKUS_HTTP_PORT: "8080"
+  QUARKUS_HTTP_HOST: "0.0.0.0"
+  QUARKUS_LOG_LEVEL: "INFO"
+  APP_PUBLIC_BASE_URL: "https://voice.jppwl.asia"
+  GEMINI_MODEL_NAME: "gemini-3.8-live"
+  GEMINI_VOICE_NAME: "Puck"
+  SESSION_TTL_SECONDS: "300"
+  MAX_CALL_DURATION_SECONDS: "1800"

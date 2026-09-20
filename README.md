@@ -1,59 +1,58 @@
 # Gemini Live Bridge (gemini-live-bridge)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
-[![FastAPI](https://img.shields.io/badge/Framework-FastAPI-009688.svg)](https://fastapi.tiangolo.com)
-[![Google Gemini Live](https://img.shields.io/badge/AI-Gemini%203.8%20Live-4285F4.svg)](https://ai.google.dev)
+[![Java 21](https://img.shields.io/badge/Java-21%20LTS-ED8B00?logo=openjdk&logoColor=white)](https://adoptium.net)
+[![Quarkus 3.x](https://img.shields.io/badge/Framework-Quarkus%203.x-4695EB?logo=quarkus&logoColor=white)](https://quarkus.io)
+[![LangChain4j](https://img.shields.io/badge/AI-LangChain4j-FF6F00)](https://github.com/langchain4j/langchain4j)
+[![k3s OCI ARM](https://img.shields.io/badge/Deploy-k3s%20OCI%20ARM64-326CE5?logo=kubernetes&logoColor=white)](https://k3s.io)
+[![Google Gemini Live](https://img.shields.io/badge/Model-Gemini%203.8%20Live-4285F4?logo=google&logoColor=white)](https://ai.google.dev)
 
 > 🚀 **Realtime Voice Bridge Service** connecting IM platforms (**Feishu / Lark** & **Slack**) to Google **Gemini 3.8 Live API** for ultra-low latency, full-duplex bidirectional voice calls and natural agent conversations.
+> 
+> **Enterprise Architecture**: Built on **Java 21 + Quarkus 3.x + LangChain4j**, engineered for native performance, zero-copy audio streaming, and seamless deployment on **k3s OCI Free ARM (Ampere A1)**.
 
 ---
 
 ## 🌟 核心特性 (Key Features)
 
 - 🎙️ **原生端到端全双工实时通话 (Native Full-Duplex Audio)**:
-  - 基于 Google `gemini-3.8-live` 及 `gemini-3.8-live-extended-thinking` 原生音频大模型，拒绝传统 "ASR → LLM → TTS" 级联高延迟体验。
-  - 上行支持客户端 16kHz PCM 音频实时切片推流，下行接收 24kHz PCM 极清语音平滑播放。
+  - 基于 Google `gemini-3.8-live` 及 `gemini-3.8-live-extended-thinking` 原生音频大模型，告别传统 "ASR → LLM → TTS" 级联高延迟。
+  - 上行 16kHz PCM (100ms 切片) 直推，下行接收 24kHz PCM 极清语音平滑播放。
+- ⚡ **Quarkus 极致吞吐与零拷贝流式转发 (Reactive & Zero-Copy)**:
+  - 底层基于 **Eclipse Vert.x** 事件循环，音频分片通过响应式 Buffer 零拷贝直推，常驻内存仅 **~80MB (JVM) / ~30MB (Native)**，GC 毫秒级无感知。
+- 🧠 **LangChain4j 强类型智能体大脑 (Agent Brain & Tools)**:
+  - 采用 `quarkus-langchain4j` 声明式定义 `@RegisterAiService` 与 `@Tool` 注解，在实时语音对讲中原生触发企业日程查询、邮件发送与数据库操作。
 - ⚡ **随时打断与自然插话 (Seamless Barge-in)**:
-  - 结合 Web Audio API 与 Gemini Live 原生打断信号，用户开口说话瞬间自动停止远端音频播报，实现真人对讲般流畅体验。
-- 🧠 **后台深度思考链 (Extended Thinking)**:
-  - 支持挂载带有思维链推理的模型变体，语音交互过程中兼具逻辑推导深度与自然口语化表达。
+  - 结合 Web Audio API 与 Gemini Live 原生截断信号，用户开口说话瞬间自动停止远端音频播报，实现真人对讲般流畅体验。
 - 📱 **飞书 / Slack 一键呼起 (IM Integration)**:
-  - 用户在 IM 中通过快捷指令（如 `/call`）触发，机器人秒级回推精美交互卡片。
-  - 点击卡片直接在飞书内置浏览器或外部安全浏览器中打开轻量 H5 通话界面，零客户端安装门槛。
-- 🛡️ **会话安全与隔离 (Ephemeral Token Security)**:
-  - 前端严禁直接接触 Gemini API Key；通过后端生成单次有效、短期过期的 `session_token` 完成 WSS 握手与长连接中继。
-- 🛠️ **实时工具调用 (Live Function Calling & Transcriptions)**:
-  - 支持在双向通话过程中并发进行工具调用与上下文注入，界面同步流式呈现双向文本转写字幕。
+  - 用户在 IM 中通过 `/call` 触发，机器人秒级回推富文本交互卡片。点击即可直接在移动端飞书内置 Webview 或浏览器中全屏呼起。
+- 🛡️ **k3s OCI-Free-ARM 原生适配 (Cloud Native)**:
+  - 开箱提供针对 **Oracle Cloud Infrastructure (OCI) Free Tier ARM (Ampere A1, 4 OCPU, 24GB RAM)** 优化的 k3s 编排配置与 Traefik WSS 路由配置。
 
 ---
 
-## 🏗️ 架构概览 (Architecture Overview)
+## 🏗️ 系统部署架构图 (OCI ARM k3s)
 
 ```
 [ 用户 / 移动端或电脑端 ]
-        │
         │ 1. 触发 /call 指令
         ▼
 [ 飞书 (Feishu) / Slack ]
-        │
-        │ 2. Webhook / Slash Command 回调
+        │ 2. Webhook / Slash Command
         ▼
-[ Gemini Live Bridge 微服务 ]  <───────────┐
-   ├── 会话控制面 (Token / TTL 管理)        │
-   ├── IM 交互卡片渲染器                    │ 4. 点击呼起通话
-   └── WebSocket 全双工流式网关 (Proxy)      │
-        │                                  │
-        │ 3. 下发卡片与一次性 Token 链接       │
-        ▼                                  │
-[ 手机/PC 浏览器 H5 通话页面 (AudioWorklet) ] ┘
-        │
-        │ 5. WSS: 16kHz PCM 音频帧 / 文本 / 控制指令
-        ▼
-[ Gemini Live Bridge: WSS Relay Engine ]
-        │
-        │ 6. Stateful WSS (google-genai SDK / Direct WSS)
-        ▼
+[ OCI Free ARM 节点 (Ampere A1) - k3s 集群 ]
+   ├── Traefik Ingress (TLS 443 + WSS 升级 + 3600s 长连接保活)
+   │        │
+   │        ▼
+   └── Pod: gemini-live-bridge (Java 21 + Quarkus 3.x)
+        ├── [REST 控制面] 飞书/Slack 签名验证 & 单次 Token (5min) 签发
+        ├── [实时网关] quarkus-websockets-next 监听 /ws/live/{token}
+        ├── [流式中继] Vert.x 零拷贝中继 (16k PCM 上行 / 24k PCM 下行)
+        ├── [打断控制器] Barge-in 拦截与 Jitter Buffer 秒级清空
+        └── [Agent 大脑] quarkus-langchain4j 驱动 Function Calling 工具调用
+                    │
+                    │ Stateful WSS (Gemini Live API)
+                    ▼
 [ Google Gemini 3.8 Live API (`gemini-3.8-live`) ]
 ```
 
@@ -61,16 +60,16 @@
 
 ## 📚 详细文档导航 (Documentation)
 
-- 📋 [**需求规格说明书 (Product Requirements Document)**](docs/requirements.md): 详述项目背景、用户旅程、功能边界、性能指标与异常流设计。
+- 📐 [**系统架构与部署设计说明书 (Architecture & Deployment Spec)**](docs/architecture.md):
+  - Java 21 + Quarkus 3.x 响应式分层架构；
+  - 音频流 AudioWorklet 采样与 Jitter Buffer 管线；
+  - k3s OCI-Free-ARM 节点编排与 Traefik Ingress WSS 配置；
+  - 生产级 Dockerfile.arm64 与多阶段构建。
+- 📋 [**需求规格说明书 (Product Requirements Document)**](docs/requirements.md): 业务场景、用户旅程、功能边界与 SLA 指标。
 - 🔌 [**接口与协议规格说明书 (API & Protocol Specification)**](docs/api-specification.md):
-  - 飞书 / Slack Webhook 回调与卡片交互接口；
-  - 会话管理 RESTful API；
-  - 全双工 WebSocket 报文格式（Client/Server 帧定义、PCM 音频二进制流封装、打断机制与状态迁移）；
-  - 错误码定义与统一响应规范。
-- 📐 [**系统架构与设计时序 (Architecture & Sequence Diagrams)**](docs/architecture.md):
-  - 呼叫建立、实时对讲、随时打断（Barge-in）的时序流转图；
-  - 前端 AudioWorklet 采集与重采样管线；
-  - 后端长连接中继与并发连接池模型。
+  - 飞书 / Slack Webhook 与交互卡片接口；
+  - 会话管理 RESTful 接口；
+  - WebSocket 报文格式（PCM 音频二进制帧、JSON 打断与转写控制帧）。
 
 ---
 
@@ -79,64 +78,62 @@
 ```text
 gemini-live-bridge/
 ├── docs/                             # 规格文档与架构设计
+│   ├── architecture.md               # Quarkus 架构与 k3s OCI-ARM 部署设计
 │   ├── requirements.md               # 需求说明书 (PRD)
-│   ├── api-specification.md          # 详细接口与 WS 报文协议规格
-│   └── architecture.md               # 架构时序与音频管线
-├── app/                              # 服务端源码目录 (待实现)
-│   ├── api/                          # REST & Webhook 路由
-│   │   ├── feishu.py                 # 飞书回调与卡片交互
-│   │   ├── slack.py                  # Slack 交互与 Slash Command
-│   │   └── session.py                # 呼叫会话鉴权与 Token 生成
-│   ├── websocket/                    # 实时长连接中继
-│   │   ├── gateway.py                # 客户端 WebSocket 处理器
-│   │   ├── gemini_client.py          # Google Gemini 3.8 Live 客户端
-│   │   └── audio_converter.py        # 音频分片与格式转换
-│   ├── core/                         # 基础配置、日志与安全
-│   └── static/                       # 轻量 H5 电话呼叫前端单页 (AudioWorklet)
+│   └── api-specification.md          # 详细接口与 WS 报文协议规格
+├── k8s/                              # k3s / Kubernetes 生产部署清单
+│   ├── 00-namespace.yaml             # 专属命名空间 (gemini-bridge)
+│   ├── 01-configmap.yaml             # 基础运行时环境变量
+│   ├── 02-secret.yaml                # 密钥与证书凭据模版
+│   ├── 03-deployment.yaml            # ARM64 节点亲和性与探针编排
+│   ├── 04-service.yaml               # 集群内 Service 定义
+│   └── 05-ingress.yaml               # Traefik WSS 长连接路由
+├── src/                              # Java 源码目录 (待实现)
+│   └── main/
+│       ├── java/asia/jppwl/bridge/
+│       │   ├── api/                  # 飞书/Slack Webhook & Session 控制器
+│       │   ├── websocket/            # quarkus-websockets-next 实时网关
+│       │   ├── relay/                # Vert.x Gemini Live 双向流式中继
+│       │   └── agent/                # LangChain4j Agent & Tools 定义
+│       └── resources/
+│           ├── application.properties
+│           └── META-INF/resources/   # 轻量 H5 电话呼叫前端单页 (AudioWorklet)
+├── pom.xml                           # Quarkus 3.x + Java 21 Maven 工程描述
 ├── .env.example                      # 环境变量模版
 ├── .gitignore
-├── requirements.txt                  # 依赖清单
 └── README.md
 ```
 
 ---
 
-## ⚙️ 环境配置 (Environment Variables)
+## 🚀 k3s 快速部署指引 (OCI ARM 节点)
 
-复制 `.env.example` 并填入必要配置：
+### 1. 准备密钥配置
+修改 `k8s/02-secret.yaml`，填入真实的 Google Gemini API Key 与各平台 Secret：
+```yaml
+stringData:
+  GEMINI_API_KEY: "AIzaSy..."
+  FEISHU_APP_SECRET: "sec_..."
+  SLACK_SIGNING_SECRET: "slk_..."
+  SESSION_SECRET_KEY: "your_random_jwt_secret"
+```
 
+### 2. 一键应用到 k3s
 ```bash
-# 服务监听配置
-HOST=0.0.0.0
-PORT=8765
-PUBLIC_BASE_URL=https://voice.yourdomain.com
+kubectl apply -f k8s/
+```
 
-# Google Gemini API
-GEMINI_API_KEY=your_gemini_api_key_here
-GEMINI_MODEL=gemini-3.8-live
-GEMINI_VOICE_NAME=Puck                 # 可选: Aoede, Charon, Fenrir, Kore, Puck
-SYSTEM_INSTRUCTION="你是一个贴心、专业且高效的私人智能助理，语言风格自然生动，回答言简意赅。"
-
-# 会话与安全
-SESSION_SECRET_KEY=your_random_secret_string
-SESSION_TTL_SECONDS=300                # 一次性 Token 5 分钟有效
-MAX_CALL_DURATION_SECONDS=1800         # 单次通话最大时长 30 分钟
-
-# 飞书应用凭证
-FEISHU_APP_ID=cli_xxxxxxxxxxxx
-FEISHU_APP_SECRET=xxxxxxxxxxxxxxxx
-FEISHU_VERIFICATION_TOKEN=xxxxxxxxxxxx
-
-# Slack 应用凭证
-SLACK_BOT_TOKEN=xoxb-xxxxxxxxxxxx
-SLACK_SIGNING_SECRET=xxxxxxxxxxxxxxxx
+### 3. 查看运行状态与日志
+```bash
+kubectl get pods -n gemini-bridge -o wide
+kubectl logs -n gemini-bridge -l app=gemini-live-bridge -f
 ```
 
 ---
 
-## 🤝 参与贡献与开发路线
+## 🤝 研发路线 (Roadmap)
 
-- [x] **Phase 1: 架构与需求定义 (当前阶段)** - 完成系统全流程架构设计、需求规格书、全量接口与 WebSocket 协议规范。
-- [ ] **Phase 2: 服务端中继核心打通** - 实现 FastAPI + WebSocket 代理与 Google Gemini 3.8 Live 连接池。
-- [ ] **Phase 3: Web H5 语音前端交付** - 基于 AudioWorklet 打造超低延迟 PCM 采集与播放器界面。
-- [ ] **Phase 4: 飞书 / Slack 交互闭环** - 接入消息卡片与 Slash Command，进行移动端实测调优。
+- [x] **Phase 1: 架构与技术栈定稿 (当前阶段)** - 选型 Java 21 + Quarkus 3.x + LangChain4j，完成全量接口协议、PRD 需求与 k3s OCI ARM 部署架构设计。
+- [ ] **Phase 2: Quarkus WebSocket 网关与 Vert.x 桥接** - 实现客户端 WSS 接入与 Google Gemini 3.8 Live API 零拷贝音频双向流转发。
+- [ ] **Phase 3: LangChain4j 智能体工具集成** - 注入 Hebe 人设并绑定日程/指令查询 `@Tool`。
+- [ ] **Phase 4: H5 网页呼叫界面与飞书/Slack 卡片打通** - 完成 AudioWorklet 采样与端到端测试。

@@ -1,0 +1,23 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: gemini-live-bridge-ingress
+  namespace: gemini-bridge
+  annotations:
+    kubernetes.io/ingress.class: traefik
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+    traefik.ingress.kubernetes.io/transport.respondingTimeouts.readTimeout: 3600s
+    traefik.ingress.kubernetes.io/transport.respondingTimeouts.writeTimeout: 3600s
+spec:
+  rules:
+    - host: voice.jppwl.asia
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: gemini-live-bridge-svc
+                port:
+                  number: 8080
