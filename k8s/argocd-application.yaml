@@ -1,0 +1,24 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: gemini-live-bridge
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: 'https://github.com/nvd11/gemini-live-bridge.git'
+    path: k8s
+    targetRevision: main
+  destination:
+    # 🎯 部署在 OCI ARM 所在的集群 (例如 tencent-dp1-cluster 或 in-cluster)
+    name: 'tencent-dp1-cluster'
+    namespace: gemini-bridge
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

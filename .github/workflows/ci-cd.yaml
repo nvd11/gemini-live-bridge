@@ -1,0 +1,102 @@
+name: Build, Publish & GitOps Deploy
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
+      - '.gitignore'
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: nvd11/gemini-live-bridge
+
+jobs:
+  build-and-push:
+    name: Build Multi-Arch Image & Dispatch GitOps
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU for ARM64 Emulation
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry (GHCR)
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker Metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,format=long
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build and Push Multi-Arch Container Image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./src/main/docker/Dockerfile.jvm
+          platforms: linux/arm64,linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Output Image Summary
+        run: |
+          echo "### 🚀 Published Image" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Image**: \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Commit SHA**: \`${{ github.sha }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Digest**: \`${{ steps.build.outputs.digest }}\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Dispatch GitOps Update to my-argocd-manifests
+        env:
+          DISPATCH_TOKEN: ${{ secrets.ARGOCD_MANIFESTS_DISPATCH_TOKEN }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "$DISPATCH_TOKEN" ]]; then
+            echo "::warning::ARGOCD_MANIFESTS_DISPATCH_TOKEN not set. Skipping GitOps dispatch."
+            exit 0
+          fi
+
+          echo "Dispatching 'update-image-tag' to nvd11/my-argocd-manifests for commit: $COMMIT_SHA"
+
+          response_file="$(mktemp)"
+          http_status="$(curl --silent --show-error --output "$response_file" \
+            --write-out '%{http_code}' \
+            --request POST \
+            --url https://api.github.com/repos/nvd11/my-argocd-manifests/dispatches \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $DISPATCH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            --data "$(jq -n \
+              --arg tag "$COMMIT_SHA" \
+              '{event_type:"update-image-tag",client_payload:{svc_name:"gemini-live-bridge",image_tag:$tag}}')")"
+
+          echo "GitOps dispatch HTTP status: $http_status"
+          if [[ "$http_status" != "204" ]]; then
+            cat "$response_file" >&2
+            exit 1
+          fi
+          echo "Successfully triggered GitOps deployment in my-argocd-manifests!"
