@@ -2,7 +2,7 @@
 
 | 文档版本 | 创建日期 | 状态 | 编写人 | 核心技术栈 | 部署目标 | 交付模式 |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| v2.1.0 | 2026-09-20 | 架构定稿 | Hebe | Java 21 / Quarkus 3.x / LangChain4j | k3s (OCI Free ARM Ampere A1) | GitHub Actions + ArgoCD (GitOps) |
+| v2.2.0 | 2026-09-20 | 架构定稿 | Hebe | Java 21 / Quarkus 3.x / LangChain4j | k3s (OCI Free ARM Ampere A1) | GitHub Actions + ArgoCD (GitOps) |
 
 ---
 
@@ -30,6 +30,12 @@
    - 8.4 ArgoCD 编排清单与 App-of-Apps 纳管
    - 8.5 自动化同步 (Auto-Sync) 与零停机滚动更新
    - 8.6 故障自愈 (Self-Healing) 与极速回滚机制
+9. [核心工程避坑指南与生产落地规范 (Engineering Pitfalls & Production Standards)](#9-核心工程避坑指南与生产落地规范)
+   - 9.1 移动端与飞书内置 Webview 音视频“死穴”
+   - 9.2 网络链路稳定性与 WebSocket 长连接保活
+   - 9.3 Google Gemini Live API 计费与连接泄漏防护
+   - 9.4 飞书与 Slack 回调接入细节与超时红线
+   - 9.5 Quarkus on ARM64 运维与选型准则
 
 ---
 
@@ -407,19 +413,41 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: 'https://github.com/nvd11/gemini-live-bridge.git'
-    path: k8s
-    targetRevision: main
+    repoURL: 'https://github.com/nvd11/my-shared-helm-charts.git'
+    path: charts/generic-web-service
+    targetRevision: 'v1.1.3'
+    helm:
+      values: |
+        replicaCount: 1
+        containerPort: 8080
+        nodeSelector:
+          kubernetes.io/arch: "arm64"
+          kubernetes.io/hostname: "free-arm-vm"
+        image:
+          repository: ghcr.io/nvd11/gemini-live-bridge
+          tag: 0902a8f8137351651eb72851a6572
+          pullPolicy: IfNotPresent
+        livenessProbe:
+          path: /q/health/live
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        readinessProbe:
+          path: /q/health/ready
+          initialDelaySeconds: 10
+          periodSeconds: 15
+        service:
+          type: ClusterIP
+          port: 80
+          targetPort: 8080
   destination:
-    name: 'tencent-dp1-cluster' # 或集群直连地址
+    name: 'tencent-dp1-cluster'
     namespace: gemini-bridge
   syncPolicy:
     automated:
-      prune: true       # 自动清理已在 Git 中删除的废弃资源
-      selfHeal: true    # 自动纠偏（若有人在集群中手动篡改，ArgoCD 自动覆盖修正）
+      prune: true
+      selfHeal: true
     syncOptions:
       - CreateNamespace=true
-      - ServerSideApply=true
 ```
 
 ---
@@ -434,3 +462,129 @@ spec:
 3. **极速回滚机制 (Instant Rollback)**：
    - 生产环境一旦发生异常，无需登录服务器调试，只需在 `my-argocd-manifests` 仓库执行一次 `git revert HEAD`；
    - ArgoCD 秒级检测到 Git commit 变化，自动拉取上一个稳定版本的镜像进行回滚，整个过程在 30 秒内全自动闭环。
+
+---
+
+## 9. 核心工程避坑指南与生产落地规范
+
+在端到端全双工实时语音架构落地过程中，涉及移动端系统沙箱、网络长连接防断、云厂商计费控制以及 IM 平台严苛超时限制。研发团队必须严格执行以下红线规范：
+
+### 9.1 移动端与飞书内置 Webview 音视频“死穴”
+
+#### 9.1.1 绝对强制受信任 HTTPS / WSS 证书
+- **问题本质**：iOS Safari、Android Chrome 以及飞书移动端内置浏览器遵循严苛的安全沙箱策略。**若站点使用自签证书、不信任 CA 证书或未通过标准 HTTPS 加密，浏览器内核会静默禁用 `navigator.mediaDevices.getUserMedia` API**（调用时直接返回 `undefined` 或抛出 `SecurityError`）。
+- **落地规范**：
+  - 生产接入域名（如 `voice.jppwl.asia`）必须通过 Traefik Ingress 绑定 Let's Encrypt 或已受信任机构签发的公网 TLS 证书；
+  - 严禁在内网自签 IP 地址或裸 HTTP 下联调麦克风。
+
+#### 9.1.2 移动端浏览器自动播放限制 (Autoplay Policy) 与 AudioContext 触摸唤醒
+- **问题本质**：移动端操作系统为了保护用户流量和防扰民，**禁止网页在未经用户显式手势交互（Touch / Click）的情况下播放声音**。页面刚加载时，Web Audio API 的 `AudioContext` 默认处于 `suspended` 挂起状态。
+- **落地规范**：
+  - 网页加载完成后**绝对禁止立即自动播放音频**；
+  - 界面首屏必须设计一个明显的【🟢 点击接通通话】操作按钮；
+  - 在用户点击该按钮的 `click` / `touchend` 事件处理函数首行，显式执行：
+    ```javascript
+    await audioContext.resume();
+    ```
+  - 确认 `audioContext.state === 'running'` 后，再建立 WebSocket 握手并拉取下行 24kHz PCM 音频流。
+
+#### 9.1.3 扬声器回声消除 (AEC)、降噪与自动增益规范
+- **问题本质**：当用户在手机端使用外放扬声器对讲时，若无声学回声消除，AI 说话的声音会从扬声器直接灌回手机麦克风，导致 AI 误以为用户在说话并触发虚假打断（Barge-in 自残现象）。
+- **落地规范**：前端请求麦克风时必须严格声明硬件声学处理参数：
+  ```javascript
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: {
+      channelCount: 1,
+      sampleRate: { ideal: 16000 },
+      echoCancellation: true,    // 强制开启硬件声学回声消除 (AEC)
+      noiseSuppression: true,    // 强制开启环境背景噪音抑制
+      autoGainControl: true      // 强制开启人声音量动态增益 (AGC)
+    },
+    video: false
+  });
+  ```
+
+---
+
+### 9.2 网络链路稳定性与 WebSocket 长连接保活
+
+#### 9.2.1 Cloudflare / CDN 反代 100 秒空闲超时防断
+- **问题本质**：若域名经过 Cloudflare 代理（开启 Proxy 橙色小云朵）或经过公网 NAT 网关，**当 WebSocket 连接在 100 秒内没有任何数据包交互时，中间代理层将直接发送 RST 强制切断 TCP 连接**。
+- **落地规范**：
+  - 虽然 Traefik Ingress 配置了 `3600s` 超时，但系统仍必须引入**应用层双向心跳**；
+  - 前端客户端设置心跳定时器：每隔 **15 秒** 发送一个极简的 JSON 探针文本帧：
+    ```json
+    { "event": "client.ping", "timestamp": 1726848000 }
+    ```
+  - Quarkus WebSocket 网关收到后秒级回复：
+    ```json
+    { "event": "server.pong", "timestamp": 1726848000 }
+    ```
+  - 确保整个传输链路的 TCP 连接持续处于活跃保活状态。
+
+#### 9.2.2 客户端 Jitter Buffer (抖动缓冲) 抗卡顿设计
+- **问题本质**：国内移动 5G / Wi-Fi 与海外 OCI 节点之间可能存在网络微小抖动，若收到一个 24kHz 音频分片就立即播放，网络稍有卡顿就会导致声音出现爆音、电音或碎裂感。
+- **落地规范**：
+  - 前端基于 Web Audio API 建立一个微型 **Jitter Buffer（150ms ~ 200ms）**；
+  - 客户端首个音频包到达后，预填充 150ms 的环形缓冲区再启动播放；播放过程中通过精确时间戳调度保证输出平滑连贯。
+
+---
+
+### 9.3 Google Gemini Live API 计费与连接泄漏防护
+
+#### 9.3.1 音频持续计费特征与背景噪音风险
+- **问题本质**：Google Gemini 3.8 Live API 的计费模式不同于普通文本，**其费用是按持续音频传输时长与流式上下文持续累加计算的**。只要麦克风一直在向模型推流（哪怕用户未说话，仅有微弱风噪），上游模型依然在持续消耗昂贵的 Token 额度。
+- **落地规范**：
+  1. **前端本地 VAD 预判过滤**：前端通过 AudioWorklet 计算声音能量，当环境音低于静音阈值时，不向上游推送高频 PCM 数据，仅维持轻量心跳；
+  2. **服务端静音超时自动熔断**：若建立长连接后连续 **120 秒 (2分钟)** 未检测到任何有效上下行语音与文字互动，Quarkus 服务端主动调用 `connection.close()` 切断长连接，彻底关闭 Google 上游会话；
+  3. **单次通话绝对硬上限**：单次通话强制设定 **30 分钟** 硬时限，达到时间平缓播报提示音并优雅挂断。
+
+#### 9.3.2 移动端划走/切后台/锁屏联动挂断
+- **问题本质**：手机用户常有直接上划关闭浏览器、按锁屏键或切换到其他 App 的习惯。若前端未捕获这些事件，后台的 WebSocket 可能仍保持连接数分钟，造成严重资源浪费。
+- **落地规范**：前端必须监听页面生命周期事件：
+  ```javascript
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') {
+      // 页面切后台或手机锁屏，立即主动断开连接
+      cleanupAndDisconnect('app_hidden');
+    }
+  });
+
+  window.addEventListener('beforeunload', () => {
+    cleanupAndDisconnect('page_unload');
+  });
+  ```
+
+---
+
+### 9.4 飞书与 Slack 回调接入细节与超时红线
+
+#### 9.4.1 飞书 URL 校验 3 秒极速响应要求
+- **问题本质**：在飞书开放平台管理后台配置事件订阅“请求网址 (Request URL)”时，飞书服务器会瞬间发起 HTTP POST 请求发送 `type: "url_verification"` 与 `challenge` 字符串。**飞书规定：服务端必须在 3.0 秒内原样返回该 challenge，否则直接判定配置失败**。
+- **落地规范**：
+  - 在 Quarkus 的 REST 路由处理中，URL Challenge 校验必须置于控制器的最顶层分支，**严禁在 Challenge 阶段加载任何外部资源、鉴权外部 Token 或建立 WebSocket**，收到请求必须直接同步 `return challenge`。
+
+#### 9.4.2 Slack Slash Command 3000ms 快速回执与 response_url
+- **问题本质**：Slack 的 Slash Command 同样具有严格的 **3000ms 超时限制**。若 3 秒内未收到 HTTP 200 回执，Slack 客户端会向用户抛出红色的 `Operation timed out` 错误。
+- **落地规范**：
+  - 收到 `/call` 指令后，直接返回一张即时的轻量 Block Kit 卡片（或返回 HTTP 200 确认）；
+  - 耗时的会话加密 Token 生成及日志审计通过 Quarkus 的响应式异步线程完成，必要时利用 Slack 提供的 `response_url` 异步覆写消息卡片。
+
+---
+
+### 9.5 Quarkus on ARM64 运维与选型准则
+
+#### 9.5.1 JVM Fast-Jar 模式优先原则
+- **问题本质**：虽然 GraalVM Native Image 能带来更极致的启动速度，但当前核心依赖 **LangChain4j 内部使用了大量的动态反射、动态代理与字节码增强**。要在 GraalVM Native 下运行必须人工调校并维护极其繁琐的 `reflect-config.json`，极易因第三方库的隐式反射导致 Native 运行时 `ClassNotFoundException`。
+- **落地规范**：
+  - 阶段一与生产初版**坚定采用 Quarkus Fast-Jar (JVM 模式)**；
+  - Java 21 在 ARM64 上的 Fast-Jar 启动耗时仅需 **1.2 秒**，常驻内存仅 **80MB**，性能表现已完全超越传统 Spring Boot，且兼具 100% 的 Java 动态反射兼容性。
+
+#### 9.5.2 Generational ZGC 调优与容器内存感知
+- **问题本质**：音频分片属于高频产生、瞬时销毁的高吞吐短生命周期对象（每秒收发数十个 PCM 数组）。传统的 G1GC 可能会引发几十毫秒的暂停（STW），造成下行音频卡顿爆音。
+- **落地规范**：
+  - 强制选用 Java 21 引入的 **分代 ZGC (Generational ZGC)**，将 GC 停顿时间死死压制在 **1 毫秒以内**；
+  - 生产启动参数标准配置：
+    ```bash
+    -XX:+UseZGC -XX:+ZGenerational -XX:MaxRAMPercentage=75.0
+    ```
