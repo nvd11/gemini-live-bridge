@@ -30,7 +30,6 @@ import jakarta.inject.Inject;
 public class SessionManager {
 
     private static final Logger LOG = Logger.getLogger(SessionManager.class);
-    private static final SecureRandom SECURE_RANDOM = new SecureRandom();
 
     private final BridgeConfig config;
 
@@ -207,11 +206,11 @@ public class SessionManager {
     }
 
     /**
-     * 生成高强度 16 字节 (32-char Hex) 随机单次令牌.
+     * 生成高强度 16 字节 (32-char Hex) 随机单次令牌 (运行时安全初始化).
      */
     private String generateSecureToken() {
         byte[] bytes = new byte[16];
-        SECURE_RANDOM.nextBytes(bytes);
+        new SecureRandom().nextBytes(bytes);
         return "ses_live_" + HexFormat.of().formatHex(bytes);
     }
 }
