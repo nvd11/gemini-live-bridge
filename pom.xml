@@ -16,7 +16,7 @@
         <quarkus.platform.artifact-id>quarkus-bom</quarkus.platform.artifact-id>
         <quarkus.platform.group-id>io.quarkus.platform</quarkus.platform.group-id>
         <quarkus.platform.version>3.15.1</quarkus.platform.version>
-        <quarkus-langchain4j.version>0.20.0</quarkus-langchain4j.version>
+        <assertj.version>3.26.3</assertj.version>
     </properties>
 
     <dependencyManagement>
@@ -28,18 +28,11 @@
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>
-            <dependency>
-                <groupId>io.quarkiverse.langchain4j</groupId>
-                <artifactId>quarkus-langchain4j-bom</artifactId>
-                <version>${quarkus-langchain4j.version}</version>
-                <type>pom</type>
-                <scope>import</scope>
-            </dependency>
         </dependencies>
     </dependencyManagement>
 
     <dependencies>
-        <!-- Quarkus Reactive REST & Jackson -->
+        <!-- Quarkus Reactive REST & Jackson (控制面 Webhook 与回调) -->
         <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-rest</artifactId>
@@ -49,31 +42,37 @@
             <artifactId>quarkus-rest-jackson</artifactId>
         </dependency>
 
-        <!-- Modern WebSocket Engine (WebSockets Next) -->
+        <!-- 声明式 REST Client (用于异步回推飞书交互卡片与 Slack 消息) -->
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-rest-client-jackson</artifactId>
+        </dependency>
+
+        <!-- 现代 WebSocket 响应式网关 (WebSockets Next) -->
         <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-websockets-next</artifactId>
         </dependency>
 
-        <!-- Eclipse Vert.x Core for Zero-Copy Audio Buffers -->
+        <!-- Eclipse Vert.x Core (音视频 PCM 切片零拷贝 Buffer 直推) -->
         <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-vertx</artifactId>
         </dependency>
 
-        <!-- LangChain4j for Agent Brain & Tools (Function Calling) -->
+        <!-- 定时看门狗调度器 (用于 SessionManager 30s 自动淘汰僵尸会话) -->
         <dependency>
-            <groupId>io.quarkiverse.langchain4j</groupId>
-            <artifactId>quarkus-langchain4j-core</artifactId>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-scheduler</artifactId>
         </dependency>
 
-        <!-- JWT & Security -->
+        <!-- JWT & 安全凭证管理 -->
         <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-smallrye-jwt</artifactId>
         </dependency>
 
-        <!-- Health & Metrics (k3s Probes & Prometheus) -->
+        <!-- 云原生标准探针与监控指标 (/q/health & /q/metrics) -->
         <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-smallrye-health</artifactId>
@@ -83,7 +82,7 @@
             <artifactId>quarkus-micrometer-registry-prometheus</artifactId>
         </dependency>
 
-        <!-- Testing -->
+        <!-- 单元测试套件 -->
         <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-junit5</artifactId>
@@ -92,6 +91,12 @@
         <dependency>
             <groupId>io.rest-assured</groupId>
             <artifactId>rest-assured</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+            <version>${assertj.version}</version>
             <scope>test</scope>
         </dependency>
     </dependencies>

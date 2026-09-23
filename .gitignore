@@ -23,16 +23,24 @@ wheels/
 .installed.cfg
 *.egg
 
+# Java / Maven
+target/
+*.class
+*.jar
+*.log
+
 # Environment variables & secrets
+# .env is strictly local-only; the tracked template uses a hyphen (.env-template),
+# so it is NOT matched by the .env.* pattern and stays committed on purpose.
 .env
 .env.*
-!.env.example
 *.pem
 *.key
 
 # IDE
 .idea/
 .vscode/
+*.iml
 *.swp
 *.swo
 
@@ -42,4 +50,3 @@ Thumbs.db
 
 # Logs
 logs/
-*.log

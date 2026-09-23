@@ -22,3 +22,15 @@ spec:
     syncOptions:
       - CreateNamespace=true
       - ServerSideApply=true
+
+  # ---------------------------------------------------------------------------
+  # GitOps 红线：真实机密只存在于集群 etcd（kubectl patch 注入），Git 中仅为
+  # 占位符。必须忽略 Secret 的 /data 字段漂移，否则 ArgoCD 自动同步会把真实
+  # 凭据回滚为占位符，导致生产服务熔断。
+  # ---------------------------------------------------------------------------
+  ignoreDifferences:
+    - group: ""
+      kind: Secret
+      name: gemini-live-bridge-secrets
+      jsonPointers:
+        - /data

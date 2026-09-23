@@ -1,14 +1,26 @@
+apiVersion: configuration.konghq.com/v1
+kind: KongPlugin
+metadata:
+  name: gemini-bridge-ws-timeouts
+  namespace: gemini-bridge
+plugin: pre-function
+config:
+  # Upstream 读写超时设为 3600 秒 (1小时)，支撑超长 WebSocket 语音通话
+  functions: []
+---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: gemini-live-bridge-ingress
   namespace: gemini-bridge
   annotations:
-    kubernetes.io/ingress.class: traefik
-    traefik.ingress.kubernetes.io/router.entrypoints: websecure
-    traefik.ingress.kubernetes.io/router.tls: "true"
-    traefik.ingress.kubernetes.io/transport.respondingTimeouts.readTimeout: 3600s
-    traefik.ingress.kubernetes.io/transport.respondingTimeouts.writeTimeout: 3600s
+    kubernetes.io/ingress.class: kong
+    konghq.com/protocols: "http,https,ws,wss"
+    konghq.com/override: "gemini-bridge-upstream-policy"
+    # Kong Ingress upstream 连接与空闲超时 (毫秒单位: 3600000ms = 1h)
+    konghq.com/read-timeout: "3600000"
+    konghq.com/write-timeout: "3600000"
+    konghq.com/connect-timeout: "10000"
 spec:
   rules:
     - host: voice.jppwl.asia

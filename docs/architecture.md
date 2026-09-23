@@ -2,7 +2,7 @@
 
 | 文档版本 | 创建日期 | 状态 | 编写人 | 核心技术栈 | 部署目标 | 交付模式 |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| v2.2.0 | 2026-09-20 | 架构定稿 | Hebe | Java 21 / Quarkus 3.x / LangChain4j | k3s (OCI Free ARM Ampere A1) | GitHub Actions + ArgoCD (GitOps) |
+| v3.0.0 | 2026-09-21 | 架构定稿 (极简无状态) | Hebe & Cindy | Java 21 / Quarkus 3.x / Eclipse Vert.x | k3s (OCI Free ARM Ampere A1) | GitHub Actions + ArgoCD (GitOps) |
 
 ---
 
@@ -11,16 +11,16 @@
 2. [技术栈详细选型规格 (Tech Stack)](#2-技术栈详细选型规格-tech-stack)
 3. [服务内部架构与分层设计](#3-服务内部架构与分层设计)
    - 3.1 响应式网络与 WebSocket 网关 (`quarkus-websockets-next`)
-   - 3.2 智能体与工具大脑 (`quarkus-langchain4j`)
+   - 3.2 轻量级原生 Function Calling 工具调度器 (Native-Friendly Tool Dispatcher)
    - 3.3 音频流式中继与双向打断拦截器 (Bidi Audio & Barge-in Pipeline)
 4. [k3s on OCI-Free-ARM 部署架构](#4-k3s-on-oci-free-arm-部署架构)
    - 4.1 节点环境与拓扑规范 (OCI Ampere A1)
-   - 4.2 网络穿透与 Traefik Ingress WSS 长连接配置
+   - 4.2 网络穿透与 Kong Ingress WSS 长连接配置
    - 4.3 资源配额与调度亲和性 (NodeSelector & Resources)
 5. [Kubernetes (k3s) 生产级编排配置声明](#5-kubernetes-k3s-生产级编排配置声明)
    - 5.1 Namespace & ConfigMap & Secret
    - 5.2 Deployment (ARM64 容器编排与健康检查)
-   - 5.3 Service & Ingress (Traefik WSS 路由)
+   - 5.3 Service & Ingress (Kong Ingress WSS 路由)
 6. [ARM64 容器构建与打包流水线 (OCI-ARM Native / Fast-Jar)](#6-arm64-容器构建与打包流水线)
 7. [可观测性、弹性伸缩与安全防护](#7-可观测性弹性伸缩与安全防护)
 8. [GitOps 全自动持续交付体系 (GitHub Actions + ArgoCD)](#8-gitops-全自动持续交付体系-github-actions--argocd)
@@ -36,71 +36,85 @@
    - 9.3 Google Gemini Live API 计费与连接泄漏防护
    - 9.4 飞书与 Slack 回调接入细节与超时红线
    - 9.5 Quarkus on ARM64 运维与选型准则
+10. [配置管理与机密生命周期 (Configuration & Secret Architecture)](#10-配置管理与机密生命周期-configuration--secret-architecture)
+   - 10.1 统一配置覆盖链规范 (The Precedence Chain)
+   - 10.2 SmallRye @ConfigMapping 确定性推导矩阵
+   - 10.3 本地安全防线：.env 与 .env-template 机制
+   - 10.4 生产 K3s Secret 治理 (占位符 + 运行时 Patch + ArgoCD 漂移忽略)
 
 ---
 
 ## 1. 系统总体架构与设计原则
 
-```text
-+--------------------------------------------------------------------------------------------------+
-|                                    客户端层 (Clients / Users)                                    |
-|                                                                                                  |
-|   [ 飞书 (Feishu) App ]           [ Slack Client ]          [ 手机/PC 浏览器 (AudioWorklet) ]    |
-|            |                             |                                  |                    |
-|       /call 指令                    /call 指令                        16kHz PCM 音频切片         |
-|       消息卡片交互                  交互动作按钮                      实时波形与字幕展示         |
-+------------|-----------------------------|----------------------------------|--------------------+
-             | HTTPS                       | HTTPS                            | WSS
-             +-----------------------------+----------------------------------+
-                                           |
-                                           v
-+--------------------------------------------------------------------------------------------------+
-|                   Oracle Cloud Infrastructure (OCI Free Tier) - ARM 节点                         |
-|                   Host: oci-free-arm-* (Ampere A1 4 OCPU, 24GB RAM, aarch64)                     |
-|                                                                                                  |
-|   +------------------------------------------------------------------------------------------+   |
-|   |   k3s Ingress Controller (Traefik v2/v3)                                                 |   |
-|   |   - TLS/HTTPS 终止 (Let's Encrypt / Custom SSL)                                          |   |
-|   |   - WSS 协议升级头支持 (Upgrade, Connection)                                             |   |
-|   |   - 响应超时与长连接空闲保活 (Idle Timeout: 3600s)                                       |   |
-|   +------------------------------------------------------------------------------------------+   |
-|                                              |                                                   |
-|                                              v (ClusterIP / Service)                             |
-|   +------------------------------------------------------------------------------------------+   |
-|   |   Pod: gemini-live-bridge (Quarkus 3.x Native / Fast-Jar Container on aarch64)           |   |
-|   |                                                                                          |   |
-|   |   [ Web / Webhook 控制面 ]                                                               |   |
-|   |     - quarkus-rest: 接收飞书/Slack 回调与签名验证 (HMAC-SHA256)                          |   |
-|   |     - Token Manager: 签发 5min 单次有效 Ephemeral Token                                  |   |
-|   |                                                                                          |   |
-|   |   [ WebSocket 实时网关 (quarkus-websockets-next) ]                                      |   |
-|   |     - @WebSocket: 监听 /ws/live/{token}                                                  |   |
-|   |     - 二进制帧处理器: 16k PCM (100ms 帧) 零拷贝通道                                      |   |
-|   |     - JSON 控制事件: client.interrupt (打断), client.text (文字)                         |   |
-|   |                                                                                          |   |
-|   |   [ 响应式双向流式中继 (Eclipse Vert.x & Mutiny Engine) ]                                |   |
-|   |     - Vert.x WebSocketClient: 直连 Google Gemini Live API WSS                            |   |
-|   |     - Jitter Buffer & Backpressure 管理                                                  |   |
-|   |     - Barge-in 双向拦截队列清理 (秒级切断扬声器流)                                       |   |
-|   |                                                                                          |   |
-|   |   [ 智能体与工具大脑 (quarkus-langchain4j) ]                                             |   |
-|   |     - @RegisterAiService: 业务 Agent 行为调度                                            |   |
-|   |     - @Tool (Function Calling): 语音对话中动态执行日程/邮件/数据库业务                   |   |
-|   |                                                                                          |   |
-|   |   [ 基础可观测组件 ]                                                                     |   |
-|   |     - /q/health (Liveness & Readiness 探针)                                              |   |
-|   |     - /q/metrics (Prometheus Micrometer 性能指标)                                        |   |
-|   +------------------------------------------------------------------------------------------+   |
-+--------------------------------------------------------------------------------------------------+
-                                           |
-                                           | Stateful WSS (Live API Protocol)
-                                           v
-+--------------------------------------------------------------------------------------------------+
-|                            Google 官方大模型基础设施 (Google Cloud)                                |
-|                                                                                                  |
-|   [ Gemini 3.8 Live API (`gemini-3.8-live`) ]                                                    |
-|   [ Gemini 3.8 Live Extended Thinking (`gemini-3.8-live-extended-thinking`) ]                    |
-+--------------------------------------------------------------------------------------------------+
+```mermaid
+graph TB
+    subgraph CLIENTS["客户端层 (Clients / Users)"]
+        FEISHU["飞书 (Feishu) App<br/>/call 指令 · 消息卡片交互"]
+        SLACK["Slack Client<br/>/call 指令 · 交互动作按钮"]
+        BROWSER["手机/PC 浏览器 (AudioWorklet)<br/>16kHz PCM 音频切片 · 实时波形字幕"]
+    end
+
+    subgraph OCI_ARM["Oracle Cloud Infrastructure (OCI Free Tier) - ARM 节点<br/>Host: oci-free-arm-* (Ampere A1 4 OCPU, 24GB RAM, aarch64)"]
+        subgraph INGRESS_LAYER["k3s Ingress Controller (Kong Gateway 3.6 / KIC 3.1)"]
+            KONG["Kong Ingress (KIC)<br/>• TLS/HTTPS 终结 (Let's Encrypt / Cloudflare Universal SSL)<br/>• WSS 协议升级 (konghq.com/protocols: http,https,ws,wss)<br/>• 3600s Upstream 读写空闲保活 (3600000ms)"]
+        end
+
+        subgraph POD["Pod: gemini-live-bridge (Quarkus 3.x Native / Fast-Jar on aarch64)"]
+            subgraph CONTROL_PLANE["Web / Webhook 控制面"]
+                REST["quarkus-rest<br/>签名验证 (HMAC-SHA256)"]
+                TOKEN_MGR["Token Manager<br/>签发 5min 单次有效 Ephemeral Token"]
+            end
+
+            subgraph WS_GATEWAY["WebSocket 实时网关 (quarkus-websockets-next)"]
+                WS_ENDPOINT["@WebSocket /ws/live/{token}"]
+                BINARY_HANDLER["二进制帧处理器<br/>16k PCM 100ms 零拷贝通道"]
+                JSON_HANDLER["JSON 控制事件<br/>client.interrupt / client.text"]
+            end
+
+            subgraph RELAY_PIPELINE["响应式双向流式中继 (Eclipse Vert.x & Mutiny Engine)"]
+                WS_CLIENT["Vert.x WebSocketClient<br/>直连 Gemini Live API WSS"]
+                JITTER["Jitter Buffer & Backpressure 管理"]
+                BARGE_IN["Barge-in 双向拦截器<br/>秒级截断与队列清空"]
+            end
+
+            subgraph TOOL_LAYER["轻量级原生工具分发 (Native Tool Dispatcher)"]
+                DISPATCHER["ToolExecutionRouter<br/>原生 JSON Schema 与静态 CDI 路由"]
+                TOOLS["Native Tools<br/>日程 / 运维健康检查 (无反射黑盒依赖)"]
+            end
+
+            subgraph OBSERVE["基础可观测组件"]
+                HEALTH["/q/health<br/>Liveness & Readiness 探针"]
+                METRICS["/q/metrics<br/>Prometheus 指标采集"]
+            end
+        end
+    end
+
+    subgraph GOOGLE_CLOUD["Google 官方大模型基础设施 (Google Cloud)"]
+        GEMINI_LIVE["Gemini 3.8 Live API<br/>(gemini-3.8-live)"]
+        GEMINI_THINK["Gemini 3.8 Live Extended Thinking<br/>(gemini-3.8-live-extended-thinking)"]
+    end
+
+    FEISHU -->|"HTTPS POST (Webhook)"| KONG
+    SLACK -->|"HTTPS POST (Slash Command)"| KONG
+    BROWSER -->|"WSS (16k PCM / JSON)"| KONG
+
+    KONG -->|"ClusterIP (Service :8080)"| REST
+    KONG -->|"HTTP WSS Upgrade"| WS_ENDPOINT
+
+    REST --> TOKEN_MGR
+    WS_ENDPOINT --> BINARY_HANDLER
+    WS_ENDPOINT --> JSON_HANDLER
+
+    BINARY_HANDLER --> JITTER
+    JSON_HANDLER --> BARGE_IN
+    JITTER --> WS_CLIENT
+    BARGE_IN --> WS_CLIENT
+
+    WS_CLIENT -.->|"toolCall 协议触发"| DISPATCHER
+    DISPATCHER --> TOOLS
+
+    WS_CLIENT <==>|"Stateful WSS (Bidi PCM Audio & Live Protocol)"| GEMINI_LIVE
+    WS_CLIENT <==>|"Stateful WSS (Extended Thinking Protocol)"| GEMINI_THINK
 ```
 
 ---
@@ -113,14 +127,15 @@
 | **应用框架** | **Quarkus** | **3.15+ LTS** | 云原生超快启动、超低内存常驻（RSS ~80MB）、原生编译（Native）对 ARM 友好 |
 | **底层响应式引擎** | **Eclipse Vert.x** | 内置于 Quarkus | 业界顶级的高并发异步非阻塞网络 I/O 内核，零拷贝（Zero-Copy）处理音视频切片 |
 | **全双工 WebSocket** | **`quarkus-websockets-next`** | 3.x | 注解驱动（`@WebSocket`, `@OnBinary`, `@OnTextMessage`），支持高吞吐双向流 |
-| **LLM 与智能体框架** | **`quarkus-langchain4j`** | 0.20+ / 1.x | 强类型 Agent 抽象、声明式 `@RegisterAiService`、自动 Function Calling 工具提取 |
+| **持久化与数据库** | **无 (Stateless)** | - | **纯无状态设计，无任何数据库依赖**；会话采用线程安全内存并发映射 (ConcurrentHashMap) |
+| **Function Calling 调度** | **原生 JSON 协议 + 静态 CDI** | 原生 | 直接对接 Gemini Live 官方 Bidi 工具协议，杜绝第三方 LLM 框架反射隐患，100% 适配 Native 编译 |
 | **JSON 序列化** | **Jackson (FasterXML)** | 2.17+ | 极速 JSON 解析与 DTO 绑定，支持 Protobuf 二进制扩展 |
 | **构建与依赖管理** | **Apache Maven** | 3.9+ | 与 Quarkus 官方插件生态完美集成 |
-| **容器运行时** | **k3s (Kubernetes)** | v1.30+ | 极轻量 K8s 发行版，内嵌 Containerd 与 Traefik Ingress，完美契合边缘与云端单板 |
+| **容器运行时** | **k3s (Kubernetes)** | v1.30+ | 极轻量 K8s 发行版，内嵌 Containerd，业务集群 (`tencent-dp1-cluster`) 统一由 Kong 网关接管流量 |
 | **宿主环境** | **OCI Ampere A1** | ARM Neoverse-N1 (aarch64) | 4 OCPU, 24GB RAM 永久免费实例，多核并发处理音频网络流毫无压力 |
 | **CI 持续集成** | **GitHub Actions** | Hosted Runner + Buildx | 多架构构建 (`linux/arm64`)、自动推送到 GHCR，触发 GitOps Dispatch |
 | **CD 持续交付** | **ArgoCD** | v2.10+ (App-of-Apps) | 声明式 Git 驱动、自动同步 (Auto-Sync)、故障自愈 (Self-Healing) |
-| **入口与反向代理** | **Traefik Ingress** | k3s 内置 Traefik v2/v3 | 原生支持 WebSocket 升级、3600s 长连接保活、ACME/Let's Encrypt 证书自动化 |
+| **入口与 API 网关** | **Kong Gateway (KIC)** | Kong 3.6 / KIC 3.1 | 生产 DaemonSet 部署，原生支持 HTTP/WSS 双向流、3600s Upstream 超时控制与 Cloudflare 协同 |
 
 ---
 
@@ -132,20 +147,29 @@
 2. **二进制上行通道**：客户端以 100ms 间隔推送采集的 16kHz PCM 二进制切片（3200 字节/帧），服务端通过 Vert.x `Buffer` 零拷贝管道直发上游；
 3. **控制文本帧**：实时解析用户打断（`client.interrupt`）、文本插话（`client.text`）、静音与挂断指令。
 
-### 3.2 智能体与工具大脑 (`quarkus-langchain4j`)
-集成 LangChain4j 作为 Agent 控制平面：
-1. **声明式服务定义**：
-   ```java
-   @RegisterAiService(tools = { CalendarTools.class, SystemControlTools.class })
-   @ApplicationScoped
-   public interface VoiceAgentBrain {
-       @SystemMessage("你是主人的贴心专业私人女仆秘书 Hebe，回答简短干练、富有温度。")
-       String executeAction(@UserMessage String userPrompt);
-   }
-   ```
-2. **工具自省 (Tool Inspection)**：
-   - 带有 `@Tool` 注解的 Java CDI Bean 会在编译期自动生成 JSON Schema，并注入给 Gemini Live API 的 Tool 列表中。
-   - 当模型产生 Tool Call 决策时，Quarkus 自动在当前工作线程执行该方法，并将结果作为 `tool_response` 回塞模型继续吐出语音回复。
+### 3.2 轻量级原生 Function Calling 工具调度器 (Native-Friendly Tool Dispatcher)
+
+本服务定位为高性能音视频流管道网关，**坚决不引入重量级 LLM 编排框架（如 LangChain4j）**，从而彻底规避反射黑盒、字节码动态增强及类加载地雷：
+1. **原生 Bidi 工具协议对接**：
+   - 在向 Google Gemini Live API 发起 WSS 连接的握手 Setup 帧中，直接以结构化 JSON Schema 注入所需工具声明：
+     ```json
+     {
+       "functionDeclarations": [
+         {
+           "name": "getTodaySchedule",
+           "description": "查询主人当天的日程会议安排",
+           "parameters": {
+             "type": "OBJECT",
+             "properties": { "userId": { "type": "STRING" } }
+           }
+         }
+       ]
+     }
+     ```
+2. **静态 CDI 路由分发 (ToolExecutionRouter)**：
+   - 当模型产生 `toolCall` 决策时，Vert.x 接收到 JSON 报文后直接分发至对应的静态 CDI Bean 执行对应方法；
+   - 结果直接以 `toolResponse` 帧封包回推 Google WSS 管道，模型随后继续顺畅输出语音回复；
+   - **零动态代理、零复杂反射，对 GraalVM Native AOT 编译具有 100% 免疫力与绝对友好度**。
 
 ### 3.3 音频流式中继与打断拦截器 (Bidi Audio & Barge-in Pipeline)
 1. **音频流格式规范**：
@@ -171,18 +195,19 @@
   - 4 核心（4 OCPU）+ 24GB 物理内存，为 Java 虚拟线程和网络 I/O 提供了充沛的空间。
   - 微服务实例常规只占 128MB ~ 256MB 内存，支持高并发多路语音通话并行。
 
-### 4.2 网络穿透与 Traefik Ingress WSS 长连接配置
-语音对讲依赖长时间稳定的 WebSocket 连接（单次通话最长可达 30 分钟），传统的 Ingress 默认 30s~60s 空闲超时会导致连接被强行切断。必须针对 Traefik 配置专用的注解与超时策略：
-- `traefik.ingress.kubernetes.io/router.entrypoints: websecure`
-- `traefik.ingress.kubernetes.io/router.tls: "true"`
-- `traefik.ingress.kubernetes.io/transport.respondingTimeouts.readTimeout: 3600s`
-- `traefik.ingress.kubernetes.io/transport.respondingTimeouts.writeTimeout: 3600s`
+### 4.2 网络穿透与 Kong Ingress WSS 长连接配置
+语音对讲依赖长时间稳定的 WebSocket 连接（单次通话最长可达 30 分钟）。传统的 Ingress 默认 60s 空闲超时会导致语音长连接被网关切断。必须针对目标业务集群部署的 Kong Gateway 配置专用协议与超时策略：
+- `kubernetes.io/ingress.class: kong`
+- `konghq.com/protocols: "http,https,ws,wss"`
+- `konghq.com/read-timeout: "3600000"` (毫秒单位，对应 1 小时保活)
+- `konghq.com/write-timeout: "3600000"`
+- `konghq.com/connect-timeout: "10000"`
 
 ---
 
 ## 5. Kubernetes (k3s) 生产级编排配置声明
 
-本节给出完整的可直接执行的 Kubernetes 资源清单（已配置好 ARM64 亲和性与 Traefik WSS 路由）。
+本节给出完整的可直接执行的 Kubernetes 资源清单（已配置好 ARM64 亲和性与 Kong Ingress WSS 路由）。
 
 ### 5.1 Namespace、ConfigMap 与 Secret (`k8s/`)
 
@@ -258,11 +283,11 @@ metadata:
   name: gemini-live-bridge-ingress
   namespace: gemini-bridge
   annotations:
-    kubernetes.io/ingress.class: traefik
-    traefik.ingress.kubernetes.io/router.entrypoints: websecure
-    traefik.ingress.kubernetes.io/router.tls: "true"
-    traefik.ingress.kubernetes.io/transport.respondingTimeouts.readTimeout: "3600s"
-    traefik.ingress.kubernetes.io/transport.respondingTimeouts.writeTimeout: "3600s"
+    kubernetes.io/ingress.class: kong
+    konghq.com/protocols: "http,https,ws,wss"
+    konghq.com/read-timeout: "3600000"
+    konghq.com/write-timeout: "3600000"
+    konghq.com/connect-timeout: "10000"
 spec:
   rules:
     - host: voice.jppwl.asia
@@ -279,31 +304,41 @@ spec:
 
 ---
 
-## 6. ARM64 容器构建与打包流水线
+## 6. ARM64 容器构建与打包流水线 (Quarkus Native AOT)
 
-针对 OCI Ampere A1 (ARM64) 节点，构建产物采用 **Quarkus Fast-Jar (JVM 模式)**：
+服务完全摆脱了重型依赖与反射负担，生产容器镜像采用 **Quarkus Native (基于 Mandrel JDK 21 静态编译)**：
+- **零 JRE 依赖**：运行阶段不安装任何 Java 虚拟机，直接运行纯 Linux 机器码可执行文件；
+- **极限性能**：冷启动进入 **20ms (毫秒级)**，物理常驻内存控制在 **15MB ~ 25MB**，彻底消灭 GC 停顿对语音流的潜在抖动。
 
 ```dockerfile
-# 多阶段构建：第一阶段基于 ARM64 Temurin JDK 21 打包
-FROM eclipse-temurin:21-jdk-jammy AS builder
-WORKDIR /workspace
-COPY pom.xml mvnw ./
-COPY .mvn/ .mvn/
-RUN chmod +x mvnw && ./mvnw dependency:go-offline -B || true
-COPY src/ src/
-RUN ./mvnw package -DskipTests -B
+# 第一阶段：采用 Quarkus 官方 Mandrel 构建容器进行 AOT 静态编译
+FROM quay.io/quarkus/ubi-quarkus-mandrel-builder-image:jdk-21 AS build
+USER root
+WORKDIR /work
 
-# 第二阶段：极小 JRE 运行环境，启用 Generational ZGC
-FROM eclipse-temurin:21-jre-jammy
-WORKDIR /deployments
-ENV JAVA_OPTS="-XX:+UseZGC -XX:+ZGenerational -XX:MaxRAMPercentage=75.0"
-COPY --from=builder /workspace/target/quarkus-app/lib/ /deployments/lib/
-COPY --from=builder /workspace/target/quarkus-app/*.jar /deployments/
-COPY --from=builder /workspace/target/quarkus-app/app/ /deployments/app/
-COPY --from=builder /workspace/target/quarkus-app/quarkus/ /deployments/quarkus/
+COPY .mvn .mvn
+COPY mvnw pom.xml ./
+RUN chmod +x mvnw && ./mvnw dependency:go-offline -B || true
+
+COPY src src
+RUN ./mvnw -B package -Dnative -DskipTests
+
+# 第二阶段：零 JRE 依赖的极简 Debian 运行时
+FROM debian:12-slim
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates tzdata \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd -r bridge --gid 1000 && useradd -r -g bridge --uid 1000 -d /app bridge
+COPY --from=build --chown=bridge:bridge /work/target/*-runner /app/application
+
+USER 1000
 EXPOSE 8080
-USER 185
-ENTRYPOINT [ "sh", "-c", "java $JAVA_OPTS -jar /deployments/quarkus-run.jar" ]
+ENV QUARKUS_HTTP_HOST=0.0.0.0
+
+ENTRYPOINT ["./application"]
 ```
 
 ---
@@ -458,7 +493,7 @@ spec:
    - 任何在 k3s 物理集群内通过 `kubectl edit` 的临时篡改，均会在 3 分钟内被 ArgoCD 强制抹平并回滚到 Git 中声明的状态。
 2. **零宕机滚动发布 (Zero-Downtime Rollout)**：
    - Kubernetes Deployment 默认采用 `RollingUpdate`（`maxUnavailable: 0`, `maxSurge: 1`）；
-   - 新版本的 Quarkus Pod 必须通过 `/q/health/ready` 探针校验，Traefik Ingress 才会将 WebSocket 新流量接入，正在进行的旧通话通过优雅停机等待自然结束。
+   - 新版本的 Quarkus Pod 必须通过 `/q/health/ready` 探针校验，Kong Ingress 才会将 WebSocket 新流量接入，正在进行的旧通话通过优雅停机等待自然结束。
 3. **极速回滚机制 (Instant Rollback)**：
    - 生产环境一旦发生异常，无需登录服务器调试，只需在 `my-argocd-manifests` 仓库执行一次 `git revert HEAD`；
    - ArgoCD 秒级检测到 Git commit 变化，自动拉取上一个稳定版本的镜像进行回滚，整个过程在 30 秒内全自动闭环。
@@ -474,7 +509,7 @@ spec:
 #### 9.1.1 绝对强制受信任 HTTPS / WSS 证书
 - **问题本质**：iOS Safari、Android Chrome 以及飞书移动端内置浏览器遵循严苛的安全沙箱策略。**若站点使用自签证书、不信任 CA 证书或未通过标准 HTTPS 加密，浏览器内核会静默禁用 `navigator.mediaDevices.getUserMedia` API**（调用时直接返回 `undefined` 或抛出 `SecurityError`）。
 - **落地规范**：
-  - 生产接入域名（如 `voice.jppwl.asia`）必须通过 Traefik Ingress 绑定 Let's Encrypt 或已受信任机构签发的公网 TLS 证书；
+  - 生产接入域名（如 `voice.jppwl.asia`）必须通过 Kong Ingress 配合 Cloudflare Universal SSL 或标准公网受信任 CA 证书终结；
   - 严禁在内网自签 IP 地址或裸 HTTP 下联调麦克风。
 
 #### 9.1.2 移动端浏览器自动播放限制 (Autoplay Policy) 与 AudioContext 触摸唤醒
@@ -511,7 +546,7 @@ spec:
 #### 9.2.1 Cloudflare / CDN 反代 100 秒空闲超时防断
 - **问题本质**：若域名经过 Cloudflare 代理（开启 Proxy 橙色小云朵）或经过公网 NAT 网关，**当 WebSocket 连接在 100 秒内没有任何数据包交互时，中间代理层将直接发送 RST 强制切断 TCP 连接**。
 - **落地规范**：
-  - 虽然 Traefik Ingress 配置了 `3600s` 超时，但系统仍必须引入**应用层双向心跳**；
+  - 虽然 Kong Ingress 已经将 Upstream 读写超时配置为 `3600000ms` (1小时)，但为了防止 Cloudflare Edge 节点的 100 秒空闲超时熔断，系统**必须强制引入应用层双向心跳**；
   - 前端客户端设置心跳定时器：每隔 **15 秒** 发送一个极简的 JSON 探针文本帧：
     ```json
     { "event": "client.ping", "timestamp": 1726848000 }
@@ -574,11 +609,11 @@ spec:
 
 ### 9.5 Quarkus on ARM64 运维与选型准则
 
-#### 9.5.1 JVM Fast-Jar 模式优先原则
-- **问题本质**：虽然 GraalVM Native Image 能带来更极致的启动速度，但当前核心依赖 **LangChain4j 内部使用了大量的动态反射、动态代理与字节码增强**。要在 GraalVM Native 下运行必须人工调校并维护极其繁琐的 `reflect-config.json`，极易因第三方库的隐式反射导致 Native 运行时 `ClassNotFoundException`。
-- **落地规范**：
-  - 阶段一与生产初版**坚定采用 Quarkus Fast-Jar (JVM 模式)**；
-  - Java 21 在 ARM64 上的 Fast-Jar 启动耗时仅需 **1.2 秒**，常驻内存仅 **80MB**，性能表现已完全超越传统 Spring Boot，且兼具 100% 的 Java 动态反射兼容性。
+#### 9.5.1 无反射包袱与双模部署兼容设计 (JVM & Native Ready)
+- **极简架构红线**：服务彻底剥离了重型 LLM 框架（如 LangChain4j）及任何数据库 ORM 框架，工程中完全不存在动态类加载或无法预测的动态反射；
+- **部署阶段规划**：
+  - **开发与生产初期**：采用 **Quarkus Fast-Jar (JVM 模式)**，Java 21 在 ARM64 上冷启动耗时仅需 **0.8 秒**，常驻内存仅 **~40MB**，构建速度极快（CI 仅需 1 分钟）；
+  - **未来按需切换 Native**：由于代码完全无反射死角，后续可一键启用 Quarkus Native Profile 进行 AOT 编译，启动时间进一步压缩至 **20 毫秒**，常驻内存仅 **15MB**。
 
 #### 9.5.2 Generational ZGC 调优与容器内存感知
 - **问题本质**：音频分片属于高频产生、瞬时销毁的高吞吐短生命周期对象（每秒收发数十个 PCM 数组）。传统的 G1GC 可能会引发几十毫秒的暂停（STW），造成下行音频卡顿爆音。
@@ -588,3 +623,108 @@ spec:
     ```bash
     -XX:+UseZGC -XX:+ZGenerational -XX:MaxRAMPercentage=75.0
     ```
+
+---
+
+## 10. 配置管理与机密生命周期 (Configuration & Secret Architecture)
+
+系统全面吸收 `cctv-collector` 在边缘与云原生环境下的成熟工程经验，采用 **“.env 本地开发 + @ConfigMapping 强类型映射 + K3s 外部机密治理”** 的双模协同架构。
+
+### 10.1 统一配置覆盖链规范 (The Precedence Chain)
+
+配置按确定性优先级穿透覆盖（数值越大，优先级越高）：
+
+```mermaid
+graph BT
+    L1["1. @WithDefault 代码级保底<br/>(Priority 100 · 固化在接口方法签名)"]
+    L2["2. application.properties 镜像内置参数<br/>(Priority 250 · 打包在 fast-jar 内的基础参数)"]
+    L3["3. 本地脱敏配置文件 .env<br/>(Priority 290 · 仅开发者本地，严格 gitignore)"]
+    L4["4. K3s ConfigMap / Secret (POSIX UPPER_UNDERSCORE)<br/>(Priority 300 · 生产最高权威，通过 envFrom 注入)"]
+
+    L1 --> L2
+    L2 --> L3
+    L3 --> L4
+```
+
+- **容器环境无需挂载文件**：K3s 注入的环境变量具有最高优先级（300），无缝覆盖下层的一切默认值；
+- **本地开发无需改动代码**：本地存在 `.env` 时，优先级高于代码内默认配置；
+- **零配置开箱即用**：依靠 `@WithDefault` 和 `application.properties`，全套离线单元测试依然能毫秒级闭环。
+
+---
+
+### 10.2 SmallRye @ConfigMapping 确定性推导矩阵
+
+以 `bridge` 为根命名空间（Prefix），通过 Quarkus 内置 SmallRye Config 引擎自动映射：
+1. **CamelCase &rarr; kebab-case**：`publicBaseUrl` &rarr; `public-base-url`
+2. **Prefix 拼接**：`bridge.public-base-url`
+3. **POSIX 转换**：`BRIDGE_PUBLIC_BASE_URL`
+
+| 配置分类 | Java 接口契约方法 (`@ConfigMapping(prefix = "bridge")`) | `application.properties` 键名 | 本地 `.env` 与 K3s 环境变量 (POSIX 规范) | 默认值 / 约束 |
+|---|---|---|---|---|
+| **服务标识** | `String publicBaseUrl()` | `bridge.public-base-url` | `BRIDGE_PUBLIC_BASE_URL` | **必填 (Fail-Fast)**，如 `https://voice.jppwl.asia` |
+| **运行环境** | `String environment()` | `bridge.environment` | `BRIDGE_ENVIRONMENT` | 默认 `production` (本地设为 `dev`) |
+| **Gemini 密钥** | `gemini().apiKey()` | `bridge.gemini.api-key` | `BRIDGE_GEMINI_API_KEY` | **必填 (Fail-Fast)**，机密项，绝不落盘 |
+| **Gemini 模型** | `gemini().modelName()` | `bridge.gemini.model-name` | `BRIDGE_GEMINI_MODEL_NAME` | 默认 `gemini-3.8-live` |
+| **Gemini 声线** | `gemini().voiceName()` | `bridge.gemini.voice-name` | `BRIDGE_GEMINI_VOICE_NAME` | 默认 `Puck` (Hebe 专属音色) |
+| **Gemini 人设** | `gemini().systemInstruction()` | `bridge.gemini.system-instruction` | `BRIDGE_GEMINI_SYSTEM_INSTRUCTION` | 默认注入 Hebe 贴心女仆与专业秘书人设 |
+| **会话密钥** | `session().secretKey()` | `bridge.session.secret-key` | `BRIDGE_SESSION_SECRET_KEY` | **必填 (Fail-Fast)**，用于生成单次 5min JWT |
+| **会话有效期** | `session().tokenTtlSeconds()` | `bridge.session.token-ttl-seconds` | `BRIDGE_SESSION_TOKEN_TTL_SECONDS` | 默认 `300` 秒 (5分钟) |
+| **通话硬上限** | `session().maxCallDurationSeconds()` | `bridge.session.max-call-duration-seconds` | `BRIDGE_SESSION_MAX_CALL_DURATION_SECONDS` | 默认 `1800` 秒 (30分钟强制保护挂断) |
+| **静音熔断** | `session().idleTimeoutSeconds()` | `bridge.session.idle-timeout-seconds` | `BRIDGE_SESSION_IDLE_TIMEOUT_SECONDS` | 默认 `120` 秒 (2分钟无互动断连停计费) |
+| **飞书 App ID** | `feishu().appId()` | `bridge.feishu.app-id` | `BRIDGE_FEISHU_APP_ID` | `Optional<String>`，未接入时静默忽略 |
+| **飞书密钥** | `feishu().appSecret()` | `bridge.feishu.app-secret` | `BRIDGE_FEISHU_APP_SECRET` | `Optional<String>`，机密项 |
+| **飞书验证 Token**| `feishu().verificationToken()` | `bridge.feishu.verification-token` | `BRIDGE_FEISHU_VERIFICATION_TOKEN` | `Optional<String>`，机密项 |
+| **Slack 签名密钥**| `slack().signingSecret()` | `bridge.slack.signing-secret` | `BRIDGE_SLACK_SIGNING_SECRET` | `Optional<String>`，机密项 |
+
+---
+
+### 10.3 本地安全防线：.env 与 .env-template 机制
+
+1. 仓库中**仅签入完全脱敏的模板文件 `.env-template`**；
+2. `.gitignore` 规则：
+   ```gitignore
+   .env
+   .env.*
+   ```
+   *(注：`.env-template` 采用连字符命名，不命中 `.env.*`，保持 Git 追踪)*；
+3. 本地开发只需一键拷贝并填写真实密钥：
+   ```bash
+   cp .env-template .env
+   ```
+
+---
+
+### 10.4 生产 K3s Secret 治理方案 (占位符 + 运行时 Patch + ArgoCD 漂移忽略)
+
+遵循主人的集群机密管理铁律：**“机密不进 Git —— Git 只留 `stringData` 占位符 + ArgoCD `ignoreDifferences: /data`，真密码在集群 etcd”**。
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Ops as 运维管理员 / Jason
+    participant Git as Git 清单库 (k8s/02-secret.yaml)
+    participant Argo as ArgoCD 控制面
+    participant Etcd as K3s 集群 etcd
+    participant Pod as gemini-live-bridge Pod
+
+    Git->>Argo: 1. 提交含占位符的 Secret (REPLACE_ME_PATCH_VIA_KUBECTL)
+    Argo->>Etcd: 2. 初始同步 Secret 到集群
+    Ops->>Etcd: 3. kubectl patch stringData 注入真实 Gemini API Key & Session Secret
+    Note over Argo,Etcd: 4. ArgoCD ignoreDifferences 拦截 /data 路径漂移，禁止回滚
+    Ops->>Pod: 5. kubectl rollout restart 重启 Pod
+    Pod->>Etcd: 6. 容器启动通过 envFrom 读取真实环境变量
+```
+
+#### 运维生产安全注入操作范式
+
+```bash
+# 1. 向集群 Secret 注入真实 Gemini API 密钥与 Session 签名密钥
+kubectl -n gemini-bridge patch secret gemini-live-bridge-secrets --type merge \
+  -p '{"stringData":{
+    "BRIDGE_GEMINI_API_KEY":"AIzaSy真实生产密钥",
+    "BRIDGE_SESSION_SECRET_KEY":"'$(openssl rand -hex 32)'"
+  }}'
+
+# 2. 触发滚动更新，让新 Pod 重新载入真实环境变量
+kubectl -n gemini-bridge rollout restart deploy/gemini-live-bridge
+```

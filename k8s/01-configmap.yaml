@@ -1,14 +1,41 @@
+# =============================================================================
+# Gemini Live Bridge - ConfigMap (non-sensitive runtime knobs only)
+#
+# Naming contract: every key MUST be POSIX-compliant UPPER_UNDERSCORE so that
+# Quarkus @ConfigMapping (asia.jppwl.bridge.config.BridgeConfig) binds them
+# automatically:
+#     BRIDGE_GEMINI_MODEL_NAME  ->  bridge.gemini.model-name  ->  gemini().modelName()
+#
+# Any key carrying a secret (API keys, signing secrets, session secret) MUST
+# live in k8s/02-secret.yaml instead — never put plaintext credentials here.
+# =============================================================================
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: gemini-live-bridge-config
   namespace: gemini-bridge
+  labels:
+    app: gemini-live-bridge
 data:
-  QUARKUS_HTTP_PORT: "8080"
+  # ---- Quarkus runtime ----
   QUARKUS_HTTP_HOST: "0.0.0.0"
+  QUARKUS_HTTP_PORT: "8080"
   QUARKUS_LOG_LEVEL: "INFO"
-  APP_PUBLIC_BASE_URL: "https://voice.jppwl.asia"
-  GEMINI_MODEL_NAME: "gemini-3.8-live"
-  GEMINI_VOICE_NAME: "Puck"
-  SESSION_TTL_SECONDS: "300"
-  MAX_CALL_DURATION_SECONDS: "1800"
+
+  # ---- Service identity (non-sensitive) ----
+  BRIDGE_ENVIRONMENT: "production"
+  BRIDGE_PUBLIC_BASE_URL: "https://voice.jppwl.asia"
+
+  # ---- Gemini Live (non-sensitive) ----
+  BRIDGE_GEMINI_MODEL_NAME: "gemini-3.8-live"
+  BRIDGE_GEMINI_VOICE_NAME: "Puck"
+  BRIDGE_GEMINI_SYSTEM_INSTRUCTION: "你叫Hebe，是主人的专属贴心女仆与专业个人秘书。语言风格自然、温暖、干练，回答言简意赅。"
+
+  # ---- Session guardrails (non-sensitive) ----
+  BRIDGE_SESSION_TOKEN_TTL_SECONDS: "300"
+  BRIDGE_SESSION_MAX_CALL_DURATION_SECONDS: "1800"
+  BRIDGE_SESSION_IDLE_TIMEOUT_SECONDS: "120"
+
+  # ---- Feishu / Slack public identifiers (non-secret parts only) ----
+  # Uncomment only on Feishu-enabled deployments; app-secret stays in the Secret.
+  # BRIDGE_FEISHU_APP_ID: "cli_xxxxxxxxxxxxxx"
