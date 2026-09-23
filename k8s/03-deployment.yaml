@@ -15,11 +15,13 @@ spec:
       labels:
         app: gemini-live-bridge
     spec:
+      # 显式钉在 OCI 新加坡 ARM 节点 (海外网络最优直连 Google)
       nodeSelector:
         kubernetes.io/arch: arm64
+        kubernetes.io/hostname: free-arm-vm
       containers:
         - name: bridge-service
-          image: nvd11/gemini-live-bridge:latest
+          image: ghcr.io/nvd11/gemini-live-bridge:latest
           imagePullPolicy: Always
           ports:
             - name: http-ws
