@@ -111,8 +111,7 @@ class SessionManagerTest {
         } catch (InterruptedException ignored) {}
 
         // 执行看门狗扫盘
-        int swept = sessionManager.sweepExpiredSessions();
-        assertThat(swept).isEqualTo(1);
+        sessionManager.sweepExpiredSessions();
         assertThat(sessionManager.getPendingTokenCount()).isZero();
 
         // 此时再去核销该 Token 必定失败

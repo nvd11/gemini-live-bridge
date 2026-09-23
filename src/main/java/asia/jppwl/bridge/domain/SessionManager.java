@@ -177,11 +177,9 @@ public class SessionManager {
 
     /**
      * 30 秒定时看门狗：清理超期未连线的僵尸 Token 以及超过通话时长硬上限的会话.
-     *
-     * @return 本轮扫盘清理的过期实体总数
      */
     @Scheduled(every = "30s", concurrentExecution = Scheduled.ConcurrentExecution.SKIP)
-    public int sweepExpiredSessions() {
+    public void sweepExpiredSessions() {
         int sweptCount = 0;
 
         // 1. 扫描清理未接入且超期的 Token
@@ -206,7 +204,6 @@ public class SessionManager {
         if (sweptCount > 0) {
             LOG.infof("Watchdog cycle completed: cleaned up %d expired sessions/tokens.", sweptCount);
         }
-        return sweptCount;
     }
 
     /**

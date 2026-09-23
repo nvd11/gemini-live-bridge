@@ -118,7 +118,7 @@ classDiagram
             +createSession(CreateSessionRequest req) CallSession
             +validateAndConsumeToken(String token) Optional~CallSession~
             +terminateSession(String sessionId, String reason) SessionSummary
-            +sweepExpiredSessions() int
+            +sweepExpiredSessions() void
             +getActiveSessionCount() int
         }
 
