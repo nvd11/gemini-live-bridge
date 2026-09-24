@@ -1,13 +1,10 @@
 package asia.jppwl.bridge.websocket;
 
-import java.io.IOException;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
 import org.jboss.logging.Logger;
-
-import com.fasterxml.jackson.databind.ObjectMapper;
 
 import asia.jppwl.bridge.domain.CallSession;
 import asia.jppwl.bridge.domain.SessionManager;
@@ -15,8 +12,6 @@ import asia.jppwl.bridge.domain.SessionSummary;
 import asia.jppwl.bridge.relay.DownstreamSink;
 import asia.jppwl.bridge.relay.GeminiLiveRelayService;
 import asia.jppwl.bridge.relay.GeminiLiveSession;
-import asia.jppwl.bridge.websocket.dto.ClientControlEvent;
-import asia.jppwl.bridge.websocket.dto.ServerControlEvent;
 import io.quarkus.websockets.next.CloseReason;
 import io.quarkus.websockets.next.OnBinaryMessage;
 import io.quarkus.websockets.next.OnClose;
@@ -27,6 +22,7 @@ import io.quarkus.websockets.next.PathParam;
 import io.quarkus.websockets.next.WebSocket;
 import io.quarkus.websockets.next.WebSocketConnection;
 import io.vertx.core.buffer.Buffer;
+import io.vertx.core.json.JsonObject;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -34,20 +30,7 @@ import jakarta.inject.Inject;
  * 客户端全双工 WebSocket 实时接入网关.
  *
  * <p>端点路径：{@code /ws/live/{token}}
- * <p>技术栈：Quarkus WebSockets Next + Vert.x Buffer 零拷贝通道 + Gemini Live 上游中继
- *
- * <p><b>核心边界职责：</b>
- * <ol>
- *   <li><b>安全防重放：</b>握手建立首秒，原子核销 {@code token}。若已被使用或超期，下发 4001 拒绝握手；</li>
- *   <li><b>防 Cloudflare 100s 熔断心跳：</b>响应 {@code client.ping} 文本帧，秒级回推 {@code server.pong}，重置 CDN 倒计时；</li>
- *   <li><b>Barge-in 双向打断：</b>响应 {@code client.interrupt}，秒级清空下行缓冲队列并向 Google 发送截断信令；</li>
- *   <li><b>零拷贝双向音频中继：</b>
- *     <ul>
- *       <li>上行：接收客户端 16kHz PCM 二进制帧，零拷贝推送至上游 {@link GeminiLiveSession}；</li>
- *       <li>下行：接收 Google 吐出的 24kHz PCM 音频切片与字幕增量，直推客户端扬声器与字幕框。</li>
- *     </ul>
- *   </li>
- * </ol>
+ * <p>纯原生 Vert.x JsonObject 驱动，完全规避 Jackson 反射在 GraalVM Native 下的序列化陷阱。
  */
 @WebSocket(path = "/ws/live/{token}")
 @ApplicationScoped
@@ -68,19 +51,16 @@ public class LiveWebSocketGateway {
     private final SessionManager sessionManager;
     private final BargeInController bargeInController;
     private final GeminiLiveRelayService relayService;
-    private final ObjectMapper objectMapper;
 
     @Inject
     public LiveWebSocketGateway(
             SessionManager sessionManager,
             BargeInController bargeInController,
-            GeminiLiveRelayService relayService,
-            ObjectMapper objectMapper
+            GeminiLiveRelayService relayService
     ) {
         this.sessionManager = sessionManager;
         this.bargeInController = bargeInController;
         this.relayService = relayService;
-        this.objectMapper = objectMapper;
     }
 
     /**
@@ -101,11 +81,17 @@ public class LiveWebSocketGateway {
         CallSession session = sessionOpt.get();
         connectionSessionMap.put(conn.id(), session);
 
-        // 2. 下发 session.ready 欢迎与音频规格声明帧
-        ServerControlEvent.SessionReady readyEvent = ServerControlEvent.SessionReady.of(
-                session.sessionId(), session.modelVariant()
-        );
-        sendJson(conn, readyEvent);
+        // 2. 原生构造下发 session.ready 欢迎与音频规格声明帧
+        JsonObject readyJson = new JsonObject()
+                .put("event", "session.ready")
+                .put("data", new JsonObject()
+                        .put("session_id", session.sessionId())
+                        .put("model", session.modelVariant())
+                        .put("audio_format", new JsonObject()
+                                .put("input", new JsonObject().put("sample_rate", 16000).put("channels", 1).put("bit_depth", 16))
+                                .put("output", new JsonObject().put("sample_rate", 24000).put("channels", 1).put("bit_depth", 16))));
+
+        sendJson(conn, readyJson);
         LOG.infof("WebSocket handshake completed: sessionId=%s, connId=%s, user=%s",
                 session.sessionId(), conn.id(), session.userId());
 
@@ -123,21 +109,32 @@ public class LiveWebSocketGateway {
 
             @Override
             public void sendTranscriptDelta(String role, String delta, boolean isFinal) {
-                sendJson(conn, new ServerControlEvent.TranscriptDelta(
-                        ServerControlEvent.TranscriptDelta.EVENT_NAME, role, delta, isFinal, System.currentTimeMillis()
-                ));
+                JsonObject transcriptJson = new JsonObject()
+                        .put("event", "transcript.delta")
+                        .put("role", role)
+                        .put("delta", delta)
+                        .put("is_final", isFinal)
+                        .put("timestamp", System.currentTimeMillis());
+                sendJson(conn, transcriptJson);
             }
 
             @Override
             public void sendInterruptedNotification() {
-                sendJson(conn, ServerControlEvent.Interrupted.now());
+                JsonObject interruptedJson = new JsonObject()
+                        .put("event", "server.interrupted")
+                        .put("timestamp", System.currentTimeMillis());
+                sendJson(conn, interruptedJson);
             }
 
             @Override
             public void onUpstreamClosed(String reason) {
                 LOG.infof("Upstream closed notification received for session %s: %s", session.sessionId(), reason);
                 if (!conn.isClosed()) {
-                    sendJson(conn, ServerControlEvent.SessionClosed.of(reason, session.getActiveDurationSeconds()));
+                    JsonObject closedJson = new JsonObject()
+                            .put("event", "session.closed")
+                            .put("reason", reason)
+                            .put("duration_seconds", session.getActiveDurationSeconds());
+                    sendJson(conn, closedJson);
                     conn.closeAndAwait(new CloseReason(CLOSE_NORMAL, reason));
                 }
             }
@@ -152,7 +149,8 @@ public class LiveWebSocketGateway {
                         },
                         err -> {
                             LOG.errorf(err, "Failed to connect to Google Live API for session %s", session.sessionId());
-                            sendJson(conn, ServerControlEvent.SessionClosed.of("upstream_error", 0));
+                            JsonObject errJson = new JsonObject().put("event", "session.closed").put("reason", "upstream_error");
+                            sendJson(conn, errJson);
                             conn.closeAndAwait(new CloseReason(CLOSE_NORMAL, "upstream_error"));
                         }
                 );
@@ -188,19 +186,20 @@ public class LiveWebSocketGateway {
         }
 
         try {
-            ClientControlEvent.BaseEvent base = objectMapper.readValue(jsonPayload, ClientControlEvent.BaseEvent.class);
-            if (base.event() == null) {
+            JsonObject json = new JsonObject(jsonPayload);
+            String event = json.getString("event");
+            if (event == null) {
                 return;
             }
 
-            switch (base.event()) {
-                case ClientControlEvent.Ping.EVENT_NAME -> handleHeartbeat(conn, jsonPayload);
-                case ClientControlEvent.Interrupt.EVENT_NAME -> handleInterrupt(conn);
-                case ClientControlEvent.TextMessage.EVENT_NAME -> handleClientText(conn, jsonPayload);
-                case ClientControlEvent.Hangup.EVENT_NAME -> handleHangup(conn, jsonPayload);
-                default -> LOG.debugf("Ignored unhandled client control event: %s", base.event());
+            switch (event) {
+                case "client.ping" -> handleHeartbeat(conn, json);
+                case "client.interrupt" -> handleInterrupt(conn);
+                case "client.text" -> handleClientText(conn, json);
+                case "client.hangup" -> handleHangup(conn, json);
+                default -> LOG.debugf("Ignored unhandled client control event: %s", event);
             }
-        } catch (IOException e) {
+        } catch (Exception e) {
             LOG.warnf("Failed to parse client control frame: %s, error=%s", jsonPayload, e.getMessage());
         }
     }
@@ -208,15 +207,13 @@ public class LiveWebSocketGateway {
     /**
      * 抵消 Cloudflare 100s 空闲超时的双向心跳处理 (每 15s 一次).
      */
-    public void handleHeartbeat(WebSocketConnection conn, String jsonPayload) {
-        try {
-            ClientControlEvent.Ping ping = objectMapper.readValue(jsonPayload, ClientControlEvent.Ping.class);
-            ServerControlEvent.Pong pong = ServerControlEvent.Pong.of(ping.timestamp());
-            sendJson(conn, pong);
-            LOG.trace("Heartbeat cycle handled: client.ping -> server.pong");
-        } catch (IOException e) {
-            sendJson(conn, ServerControlEvent.Pong.now());
-        }
+    public void handleHeartbeat(WebSocketConnection conn, JsonObject json) {
+        long ts = json.getLong("timestamp", System.currentTimeMillis());
+        JsonObject pong = new JsonObject()
+                .put("event", "server.pong")
+                .put("timestamp", ts);
+        sendJson(conn, pong);
+        LOG.trace("Heartbeat cycle handled: client.ping -> server.pong");
     }
 
     /**
@@ -235,22 +232,25 @@ public class LiveWebSocketGateway {
             }
 
             // 3. 回发打断确认帧给前端，前端重置本地 AudioWorklet 播放器
-            sendJson(conn, ServerControlEvent.Interrupted.now());
+            JsonObject interrupted = new JsonObject()
+                    .put("event", "server.interrupted")
+                    .put("timestamp", System.currentTimeMillis());
+            sendJson(conn, interrupted);
         }
     }
 
     /**
      * 处理客户端文字插话 / 辅助指令.
      */
-    private void handleClientText(WebSocketConnection conn, String jsonPayload) throws IOException {
+    private void handleClientText(WebSocketConnection conn, JsonObject json) {
         CallSession session = connectionSessionMap.get(conn.id());
         if (session != null) {
-            ClientControlEvent.TextMessage textMsg = objectMapper.readValue(jsonPayload, ClientControlEvent.TextMessage.class);
-            LOG.infof("Forwarding client.text to Google for session %s: %s", session.sessionId(), textMsg.text());
+            String text = json.getString("text", "");
+            LOG.infof("Forwarding client.text to Google for session %s: %s", session.sessionId(), text);
 
             GeminiLiveSession upstream = upstreamSessionMap.get(session.sessionId());
             if (upstream != null && upstream.isAlive()) {
-                upstream.sendTextMessage(textMsg.text());
+                upstream.sendTextMessage(text);
             }
         }
     }
@@ -258,17 +258,10 @@ public class LiveWebSocketGateway {
     /**
      * 处理客户端主动挂断.
      */
-    private void handleHangup(WebSocketConnection conn, String jsonPayload) {
+    private void handleHangup(WebSocketConnection conn, JsonObject json) {
         CallSession session = connectionSessionMap.get(conn.id());
         String sessionId = session != null ? session.sessionId() : "unknown";
-        String reason = "user_hangup";
-        try {
-            ClientControlEvent.Hangup hangup = objectMapper.readValue(jsonPayload, ClientControlEvent.Hangup.class);
-            if (hangup.reason() != null && !hangup.reason().isBlank()) {
-                reason = hangup.reason();
-            }
-        } catch (IOException ignored) {
-        }
+        String reason = json.getString("reason", "user_hangup");
 
         LOG.infof("Client requested hangup for session %s, reason=%s", sessionId, reason);
         conn.closeAndAwait(new CloseReason(CLOSE_NORMAL, reason));
@@ -308,18 +301,17 @@ public class LiveWebSocketGateway {
     }
 
     /**
-     * 安全序列化并异步下发 JSON 文本帧.
+     * 安全序列化并异步下发 JSON 文本帧 (原生 Vert.x JsonObject 零反射直推).
      */
-    private void sendJson(WebSocketConnection conn, Object payload) {
+    private void sendJson(WebSocketConnection conn, JsonObject json) {
         if (!conn.isClosed()) {
             try {
-                String text = objectMapper.writeValueAsString(payload);
-                conn.sendText(text).subscribe().with(
+                conn.sendText(json.encode()).subscribe().with(
                         v -> {},
                         err -> LOG.errorf(err, "Failed to send text frame to connId=%s", conn.id())
                 );
             } catch (Exception e) {
-                LOG.errorf(e, "Failed to serialize text frame: %s", payload);
+                LOG.errorf(e, "Failed to serialize text frame: %s", json);
             }
         }
     }
