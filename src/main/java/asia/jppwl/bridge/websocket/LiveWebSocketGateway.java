@@ -40,13 +40,8 @@ public class LiveWebSocketGateway {
     public static final int CLOSE_NORMAL = 1000;
     public static final int CLOSE_IDLE_TIMEOUT = 4008;
 
-    /** 连接 ID (conn.id()) 到 CallSession 的映射 */
     private final ConcurrentMap<String, CallSession> connectionSessionMap = new ConcurrentHashMap<>();
-
-    /** 会话 ID 到上游 GeminiLiveSession 的映射 */
     private final ConcurrentMap<String, GeminiLiveSession> upstreamSessionMap = new ConcurrentHashMap<>();
-
-    /** 在上游 Google WSS 就绪前暂存早期客户端音频分片的缓冲队列 */
     private final ConcurrentMap<String, ConcurrentLinkedQueue<Buffer>> earlyAudioBuffer = new ConcurrentHashMap<>();
 
     private final SessionManager sessionManager;
@@ -64,14 +59,10 @@ public class LiveWebSocketGateway {
         this.relayService = relayService;
     }
 
-    /**
-     * 握手接入拦截.
-     */
     @OnOpen
     public void onOpen(WebSocketConnection conn, @PathParam("token") String token) {
         LOG.infof("Incoming WebSocket connection attempt from connId=%s with token=%s", conn.id(), token);
 
-        // 1. 原子核销 Token (CAS 防重放验证)
         Optional<CallSession> sessionOpt = sessionManager.validateAndConsumeToken(token);
         if (sessionOpt.isEmpty()) {
             LOG.warnf("Rejecting connection: invalid or consumed token=%s, connId=%s", token, conn.id());
@@ -86,7 +77,6 @@ public class LiveWebSocketGateway {
         connectionSessionMap.put(conn.id(), session);
         earlyAudioBuffer.put(session.sessionId(), new ConcurrentLinkedQueue<>());
 
-        // 2. 原生构造下发 session.ready 欢迎与音频规格声明帧
         JsonObject readyJson = new JsonObject()
                 .put("event", "session.ready")
                 .put("data", new JsonObject()
@@ -100,7 +90,6 @@ public class LiveWebSocketGateway {
         LOG.infof("WebSocket handshake completed: sessionId=%s, connId=%s, user=%s",
                 session.sessionId(), conn.id(), session.userId());
 
-        // 3. 构建下游分发回调接口 (DownstreamSink)
         DownstreamSink sink = new DownstreamSink() {
             @Override
             public void sendAudioChunk(Buffer pcm24kChunk) {
@@ -140,7 +129,6 @@ public class LiveWebSocketGateway {
                             .put("reason", reason)
                             .put("duration_seconds", session.getActiveDurationSeconds());
                     sendJson(conn, closedJson);
-                    // 异步非阻塞关闭连接，严禁在 Vert.x EventLoop 上调用 closeAndAwait()！
                     conn.close(new CloseReason(CLOSE_NORMAL, reason)).subscribe().with(
                             v -> {},
                             err -> LOG.debugf("Client connection close error: %s", err.getMessage())
@@ -149,14 +137,12 @@ public class LiveWebSocketGateway {
             }
         };
 
-        // 4. 异步开启直连 Google Gemini Live API 上游 WSS 管道
         relayService.openUpstreamChannel(session, sink)
                 .subscribe().with(
                         upstreamSession -> {
                             upstreamSessionMap.put(session.sessionId(), upstreamSession);
                             LOG.infof("Google Gemini Live upstream channel established for session %s", session.sessionId());
 
-                            // 将早前积攒的开场音频包一股脑儿全部安全补发给 Google
                             ConcurrentLinkedQueue<Buffer> earlyQueue = earlyAudioBuffer.remove(session.sessionId());
                             if (earlyQueue != null && !earlyQueue.isEmpty()) {
                                 int count = 0;
@@ -191,18 +177,20 @@ public class LiveWebSocketGateway {
             return;
         }
 
-        // 累加上行音频字节数 (统计计费与监控指标)
         session.recordUploadBytes(pcmChunk.length());
 
         GeminiLiveSession upstream = upstreamSessionMap.get(session.sessionId());
         if (upstream != null && upstream.isAlive()) {
-            // 上游已就绪，零拷贝直推
             upstream.sendAudioChunk(pcmChunk);
+            // 实时打印音频推流日志，供主人明确确认声音已推入上游！
+            LOG.infof(">>> [AUDIO IN] Received %d bytes of 16k PCM from client (session %s), forwarded to Google Live!",
+                    pcmChunk.length(), session.sessionId());
         } else {
-            // 上游握手微秒延迟中，先入早鸟缓冲队列
             ConcurrentLinkedQueue<Buffer> earlyQueue = earlyAudioBuffer.get(session.sessionId());
             if (earlyQueue != null) {
                 earlyQueue.add(pcmChunk);
+                LOG.infof(">>> [EARLY AUDIO] Buffered %d bytes for session %s (upstream connecting...)",
+                        pcmChunk.length(), session.sessionId());
             }
         }
     }
@@ -235,9 +223,6 @@ public class LiveWebSocketGateway {
         }
     }
 
-    /**
-     * 抵消 Cloudflare 100s 空闲超时的双向心跳处理 (每 15s 一次).
-     */
     public void handleHeartbeat(WebSocketConnection conn, JsonObject json) {
         long ts = json.getLong("timestamp", System.currentTimeMillis());
         JsonObject pong = new JsonObject()
@@ -247,9 +232,6 @@ public class LiveWebSocketGateway {
         LOG.trace("Heartbeat cycle handled: client.ping -> server.pong");
     }
 
-    /**
-     * 处理客户端 Barge-in 打断事件.
-     */
     private void handleInterrupt(WebSocketConnection conn) {
         CallSession session = connectionSessionMap.get(conn.id());
         if (session != null) {
@@ -267,25 +249,23 @@ public class LiveWebSocketGateway {
         }
     }
 
-    /**
-     * 处理客户端文字插话 / 辅助指令.
-     */
     private void handleClientText(WebSocketConnection conn, JsonObject json) {
         CallSession session = connectionSessionMap.get(conn.id());
         if (session != null) {
             String text = json.getString("text", "");
-            LOG.infof("Forwarding client.text to Google for session %s: %s", session.sessionId(), text);
+            LOG.infof(">>> [TEXT IN] Received client.text for session %s: '%s', forwarding to Google Live API",
+                    session.sessionId(), text);
 
             GeminiLiveSession upstream = upstreamSessionMap.get(session.sessionId());
             if (upstream != null && upstream.isAlive()) {
                 upstream.sendTextMessage(text);
+                LOG.infof(">>> [TEXT FORWARDED] Successfully written clientContent turn to Google WSS!");
+            } else {
+                LOG.warnf(">>> [TEXT DROP] Upstream session not alive for session %s", session.sessionId());
             }
         }
     }
 
-    /**
-     * 处理客户端主动挂断.
-     */
     private void handleHangup(WebSocketConnection conn, JsonObject json) {
         CallSession session = connectionSessionMap.get(conn.id());
         String sessionId = session != null ? session.sessionId() : "unknown";
@@ -298,9 +278,6 @@ public class LiveWebSocketGateway {
         );
     }
 
-    /**
-     * 连接断开回调：结算会话生命周期、关闭上游长连接并清理内存.
-     */
     @OnClose
     public void onClose(WebSocketConnection conn) {
         CallSession session = connectionSessionMap.remove(conn.id());
@@ -308,13 +285,11 @@ public class LiveWebSocketGateway {
             String sessionId = session.sessionId();
             earlyAudioBuffer.remove(sessionId);
 
-            // 1. 关闭上游 Google Live 长连接
             GeminiLiveSession upstream = upstreamSessionMap.remove(sessionId);
             if (upstream != null) {
                 upstream.close();
             }
 
-            // 2. 结算通话与清理 Jitter Buffer
             Optional<SessionSummary> summaryOpt = sessionManager.terminateSession(sessionId, "connection_closed");
             bargeInController.cleanupSession(sessionId);
             summaryOpt.ifPresent(s -> LOG.infof("Call session closed: id=%s, duration=%ds, uploaded=%d bytes",
@@ -322,9 +297,6 @@ public class LiveWebSocketGateway {
         }
     }
 
-    /**
-     * 异常边界捕获.
-     */
     @OnError
     public void onError(WebSocketConnection conn, Throwable error) {
         CallSession session = connectionSessionMap.get(conn.id());
@@ -332,9 +304,6 @@ public class LiveWebSocketGateway {
         LOG.errorf(error, "WebSocket connection error for session: %s", sessionId);
     }
 
-    /**
-     * 安全序列化并异步下发 JSON 文本帧.
-     */
     private void sendJson(WebSocketConnection conn, JsonObject json) {
         if (!conn.isClosed()) {
             try {
