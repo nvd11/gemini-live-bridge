@@ -182,15 +182,10 @@ public class LiveWebSocketGateway {
         GeminiLiveSession upstream = upstreamSessionMap.get(session.sessionId());
         if (upstream != null && upstream.isAlive()) {
             upstream.sendAudioChunk(pcmChunk);
-            // 实时打印音频推流日志，供主人明确确认声音已推入上游！
-            LOG.infof(">>> [AUDIO IN] Received %d bytes of 16k PCM from client (session %s), forwarded to Google Live!",
-                    pcmChunk.length(), session.sessionId());
         } else {
             ConcurrentLinkedQueue<Buffer> earlyQueue = earlyAudioBuffer.get(session.sessionId());
             if (earlyQueue != null) {
                 earlyQueue.add(pcmChunk);
-                LOG.infof(">>> [EARLY AUDIO] Buffered %d bytes for session %s (upstream connecting...)",
-                        pcmChunk.length(), session.sessionId());
             }
         }
     }
@@ -215,6 +210,7 @@ public class LiveWebSocketGateway {
                 case "client.ping" -> handleHeartbeat(conn, json);
                 case "client.interrupt" -> handleInterrupt(conn);
                 case "client.text" -> handleClientText(conn, json);
+                case "client.turn_complete" -> handleTurnComplete(conn);
                 case "client.hangup" -> handleHangup(conn, json);
                 default -> LOG.debugf("Ignored unhandled client control event: %s", event);
             }
@@ -230,6 +226,19 @@ public class LiveWebSocketGateway {
                 .put("timestamp", ts);
         sendJson(conn, pong);
         LOG.trace("Heartbeat cycle handled: client.ping -> server.pong");
+    }
+
+    /**
+     * 客户端 VAD 断句完成：主人说完话停顿，催促 Google 立即回答.
+     */
+    private void handleTurnComplete(WebSocketConnection conn) {
+        CallSession session = connectionSessionMap.get(conn.id());
+        if (session != null) {
+            GeminiLiveSession upstream = upstreamSessionMap.get(session.sessionId());
+            if (upstream != null && upstream.isAlive()) {
+                upstream.signalTurnComplete();
+            }
+        }
     }
 
     private void handleInterrupt(WebSocketConnection conn) {

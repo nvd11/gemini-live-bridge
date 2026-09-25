@@ -62,6 +62,17 @@ public class GeminiLiveSession {
     }
 
     /**
+     * 上行：通知 Google 主人说话已结束 (Turn Complete - 明确催促模型开始语音回复).
+     */
+    public void signalTurnComplete() {
+        if (isAlive()) {
+            JsonObject frame = GeminiMessageCodec.buildTurnCompleteSignalFrame();
+            upstreamWs.writeTextMessage(frame.encode());
+            LOG.infof(">>> [TURN COMPLETE] Signaled end-of-speech to Google Live for session %s", session.sessionId());
+        }
+    }
+
+    /**
      * 上行：向 Google 发送打断信令 (Barge-in Interrupt).
      */
     public void signalInterrupt() {
@@ -147,8 +158,7 @@ public class GeminiLiveSession {
                                     session.recordDownloadBytes(audioPcm24k.length());
                                     downstreamSink.sendAudioChunk(audioPcm24k);
 
-                                    // 当模型仅返回音频而无文本时，向前端同步字幕指示，让主人看得见回复！
-                                    downstreamSink.sendTranscriptDelta("model", "🎙️ [Hebe 语音流播报中...]", false);
+                                    downstreamSink.sendTranscriptDelta("model", "🎙️ [Hebe 语音播报中...]", false);
                                     LOG.infof("Pushed %d bytes of 24k audio down to client", audioPcm24k.length());
                                 }
                             }
@@ -178,7 +188,6 @@ public class GeminiLiveSession {
                         LOG.infof("Handling toolCall from Gemini for session %s: func=%s, id=%s, args=%s",
                                 session.sessionId(), functionName, callId, args);
 
-                        // 异步执行本地工具并回写结果
                         toolRouter.executeToolCall(functionName, args)
                                 .subscribe().with(
                                         toolOutput -> sendToolResponse(functionName, toolOutput),

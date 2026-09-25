@@ -29,7 +29,6 @@ public final class GeminiMessageCodec {
         JsonObject setup = new JsonObject();
         setup.put("model", "models/" + (modelVariant != null ? modelVariant : "gemini-3.8-live"));
 
-        // 1. 生成参数配置 (Google Live API 原生语音必须严格声明 AUDIO 模态)
         JsonObject generationConfig = new JsonObject();
         generationConfig.put("responseModalities", new JsonArray().add("AUDIO"));
 
@@ -42,14 +41,12 @@ public final class GeminiMessageCodec {
         }
         setup.put("generationConfig", generationConfig);
 
-        // 2. 注入 System Instruction 人设
         if (systemInstruction != null && !systemInstruction.isBlank()) {
             JsonObject parts = new JsonObject().put("text", systemInstruction);
             JsonObject content = new JsonObject().put("parts", new JsonArray().add(parts));
             setup.put("systemInstruction", content);
         }
 
-        // 3. 注入 Function Calling 工具列表
         if (functionDecls != null && !functionDecls.isEmpty()) {
             JsonObject toolObj = new JsonObject().put("functionDeclarations", functionDecls);
             setup.put("tools", new JsonArray().add(toolObj));
@@ -82,6 +79,14 @@ public final class GeminiMessageCodec {
 
         return new JsonObject().put("clientContent", new JsonObject()
                 .put("turns", new JsonArray().add(turn))
+                .put("turnComplete", true));
+    }
+
+    /**
+     * 构建客户端说完话后的回合结束通知帧 (Turn Complete - 催促模型立即作答).
+     */
+    public static JsonObject buildTurnCompleteSignalFrame() {
+        return new JsonObject().put("clientContent", new JsonObject()
                 .put("turnComplete", true));
     }
 

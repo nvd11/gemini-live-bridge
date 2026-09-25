@@ -274,6 +274,11 @@
     let downloadedBytesCount = 0;
     let nextPlayTime = 0;
 
+    // 智能断句 VAD 状态机
+    let isSpeaking = false;
+    let silenceStartTimestamp = 0;
+    const SILENCE_THRESHOLD_MS = 600; // 停顿 600 毫秒判定主人说完
+
     const urlParams = new URLSearchParams(window.location.search);
     const token = urlParams.get('token');
 
@@ -295,20 +300,17 @@
       statusDesc.textContent = '正在获取硬件音频授权...';
 
       try {
-        // 1. 唤醒 AudioContext
         audioContext = new (window.AudioContext || window.webkitAudioContext)();
         await audioContext.resume();
 
-        // 2. 加载现代 AudioWorklet 采样处理器
         let workletLoaded = false;
         try {
           await audioContext.audioWorklet.addModule('/audio-processor.js');
           workletLoaded = true;
         } catch (e) {
-          console.warn('AudioWorklet load failed, falling back to script processor:', e);
+          console.warn('AudioWorklet load failed, falling back:', e);
         }
 
-        // 3. 获取麦克风 (带硬件回声消除与降噪)
         mediaStream = await navigator.mediaDevices.getUserMedia({
           audio: {
             channelCount: 1,
@@ -319,7 +321,6 @@
           video: false
         });
 
-        // 4. 建立 WSS 连接
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const wsUrl = `${protocol}//${window.location.host}/ws/live/${token}`;
         
@@ -364,7 +365,6 @@
       }
     }
 
-    // 严密 3200 字节帧对齐的音频捕获流水线
     function startAudioCapture(useWorklet) {
       const source = audioContext.createMediaStreamSource(mediaStream);
 
@@ -380,10 +380,24 @@
         let sum = 0;
         for (let i = 0; i < dataArray.length; i++) sum += dataArray[i];
         let avg = Math.round(sum / dataArray.length);
+
+        const now = Date.now();
         if (avg > 15) {
           orbVisualizer.classList.add('user-speaking');
+          isSpeaking = true;
+          silenceStartTimestamp = 0;
         } else {
           orbVisualizer.classList.remove('user-speaking');
+          if (isSpeaking) {
+            if (silenceStartTimestamp === 0) {
+              silenceStartTimestamp = now;
+            } else if (now - silenceStartTimestamp >= SILENCE_THRESHOLD_MS) {
+              // 主人停顿超过 600ms，触发回合结束信令，催促模型答复！
+              isSpeaking = false;
+              silenceStartTimestamp = 0;
+              triggerTurnComplete();
+            }
+          }
         }
         debugBar.textContent = `上行: ${uploadedChunksCount} 帧 | 下行: ${downloadedBytesCount} 字节 | 麦克风能量: ${avg}`;
       }, 100);
@@ -392,7 +406,7 @@
         audioWorkletNode = new AudioWorkletNode(audioContext, 'audio-input-processor');
         audioWorkletNode.port.onmessage = (e) => {
           if (isMuted || !ws || ws.readyState !== WebSocket.OPEN) return;
-          ws.send(e.data); // 精准 3200 字节 16kHz PCM Buffer
+          ws.send(e.data);
           uploadedChunksCount++;
         };
         source.connect(audioWorkletNode);
@@ -427,6 +441,13 @@
       }
     }
 
+    function triggerTurnComplete() {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        console.log('User stopped speaking, sending turn_complete signal');
+        ws.send(JSON.stringify({ event: 'client.turn_complete', timestamp: Date.now() }));
+      }
+    }
+
     // 24kHz PCM 下行音频平滑播放
     function handleServerAudioChunk(arrayBuffer) {
       downloadedBytesCount += arrayBuffer.byteLength;
@@ -458,7 +479,6 @@
       setTimeout(() => orbVisualizer.classList.remove('model-speaking'), audioBuffer.duration * 1000);
     }
 
-    // 实时双向文字转写流处理
     function handleServerTextMessage(jsonStr) {
       try {
         const msg = JSON.parse(jsonStr);
@@ -472,20 +492,22 @@
     }
 
     function appendTranscript(role, text) {
-      const p = document.createElement('div');
-      p.className = `transcript-msg ${role}`;
-      p.textContent = `${role === 'model' ? 'Hebe: ' : '我: '}${text}`;
-      transcriptBox.appendChild(p);
+      let lastMsg = transcriptBox.lastElementChild;
+      if (lastMsg && lastMsg.classList.contains(role) && !lastMsg.classList.contains('final')) {
+        lastMsg.textContent += text;
+      } else {
+        const p = document.createElement('div');
+        p.className = `transcript-msg ${role}`;
+        p.textContent = `${role === 'model' ? 'Hebe: ' : '我: '}${text}`;
+        transcriptBox.appendChild(p);
+      }
       transcriptBox.scrollTop = transcriptBox.scrollHeight;
     }
 
     function sendManualText() {
       const input = document.getElementById('textPromptInput');
       const text = input.value.trim();
-      if (!text) {
-        alert('请输入文字');
-        return;
-      }
+      if (!text) return;
       if (!ws || ws.readyState !== WebSocket.OPEN) {
         alert('连接尚未就绪，请等待通话接通');
         return;
