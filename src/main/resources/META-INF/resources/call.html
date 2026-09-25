@@ -115,7 +115,6 @@
       font-family: monospace;
     }
 
-    /* 实时双向字幕滚动区 */
     .transcript-box {
       width: 100%;
       max-width: 520px;
@@ -155,7 +154,6 @@
       to { opacity: 1; transform: translateY(0); }
     }
 
-    /* 文字输入兜底测试栏 */
     .input-bar {
       width: 100%;
       max-width: 520px;
@@ -184,7 +182,6 @@
       cursor: pointer;
     }
 
-    /* 底部控制按钮 */
     .controls {
       display: flex;
       gap: 1.5rem;
@@ -308,7 +305,7 @@
           await audioContext.audioWorklet.addModule('/audio-processor.js');
           workletLoaded = true;
         } catch (e) {
-          console.warn('AudioWorklet load failed, falling back:', e);
+          console.warn('AudioWorklet load failed, falling back to script processor:', e);
         }
 
         // 3. 获取麦克风 (带硬件回声消除与降噪)
@@ -400,7 +397,6 @@
         };
         source.connect(audioWorkletNode);
       } else {
-        // 兼容模式：带缓冲凑齐 1600 个采样点 (3200 字节) 再推送
         const bufferSize = 4096;
         const inputSampleRate = audioContext.sampleRate;
         const processor = audioContext.createScriptProcessor(bufferSize, 1, 1);
@@ -476,25 +472,28 @@
     }
 
     function appendTranscript(role, text) {
-      let lastMsg = transcriptBox.lastElementChild;
-      if (lastMsg && lastMsg.classList.contains(role) && !lastMsg.classList.contains('final')) {
-        lastMsg.textContent += text;
-      } else {
-        const p = document.createElement('div');
-        p.className = `transcript-msg ${role}`;
-        p.textContent = `${role === 'model' ? 'Hebe: ' : '我: '}${text}`;
-        transcriptBox.appendChild(p);
-      }
+      const p = document.createElement('div');
+      p.className = `transcript-msg ${role}`;
+      p.textContent = `${role === 'model' ? 'Hebe: ' : '我: '}${text}`;
+      transcriptBox.appendChild(p);
       transcriptBox.scrollTop = transcriptBox.scrollHeight;
     }
 
     function sendManualText() {
       const input = document.getElementById('textPromptInput');
       const text = input.value.trim();
-      if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
+      if (!text) {
+        alert('请输入文字');
+        return;
+      }
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        alert('连接尚未就绪，请等待通话接通');
+        return;
+      }
 
       appendTranscript('user', text);
-      ws.send(JSON.stringify({ event: 'client.text', text: text, timestamp: Date.now() }));
+      const payload = JSON.stringify({ event: 'client.text', text: text, timestamp: Date.now() });
+      ws.send(payload);
       input.value = '';
     }
 
