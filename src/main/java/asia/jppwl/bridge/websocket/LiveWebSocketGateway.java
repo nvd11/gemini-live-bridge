@@ -29,8 +29,6 @@ import jakarta.inject.Inject;
 
 /**
  * 客户端全双工 WebSocket 实时接入网关.
- *
- * <p>具备上游连接就绪前缓冲机制 (Early Pre-Buffer)，绝不丢弃用户开场白哪怕一个 PCM 音频字节！
  */
 @WebSocket(path = "/ws/live/{token}")
 @ApplicationScoped
@@ -77,7 +75,10 @@ public class LiveWebSocketGateway {
         Optional<CallSession> sessionOpt = sessionManager.validateAndConsumeToken(token);
         if (sessionOpt.isEmpty()) {
             LOG.warnf("Rejecting connection: invalid or consumed token=%s, connId=%s", token, conn.id());
-            conn.closeAndAwait(new CloseReason(CLOSE_UNAUTHORIZED, "Unauthorized or token consumed"));
+            conn.close(new CloseReason(CLOSE_UNAUTHORIZED, "Unauthorized or token consumed")).subscribe().with(
+                    v -> {},
+                    err -> LOG.debugf("Connection close error: %s", err.getMessage())
+            );
             return;
         }
 
@@ -139,7 +140,11 @@ public class LiveWebSocketGateway {
                             .put("reason", reason)
                             .put("duration_seconds", session.getActiveDurationSeconds());
                     sendJson(conn, closedJson);
-                    conn.closeAndAwait(new CloseReason(CLOSE_NORMAL, reason));
+                    // 异步非阻塞关闭连接，严禁在 Vert.x EventLoop 上调用 closeAndAwait()！
+                    conn.close(new CloseReason(CLOSE_NORMAL, reason)).subscribe().with(
+                            v -> {},
+                            err -> LOG.debugf("Client connection close error: %s", err.getMessage())
+                    );
                 }
             }
         };
@@ -168,7 +173,10 @@ public class LiveWebSocketGateway {
                             LOG.errorf(err, "Failed to connect to Google Live API for session %s", session.sessionId());
                             JsonObject errJson = new JsonObject().put("event", "session.closed").put("reason", "upstream_error");
                             sendJson(conn, errJson);
-                            conn.closeAndAwait(new CloseReason(CLOSE_NORMAL, "upstream_error"));
+                            conn.close(new CloseReason(CLOSE_NORMAL, "upstream_error")).subscribe().with(
+                                    v -> {},
+                                    closeErr -> {}
+                            );
                         }
                 );
     }
@@ -191,7 +199,7 @@ public class LiveWebSocketGateway {
             // 上游已就绪，零拷贝直推
             upstream.sendAudioChunk(pcmChunk);
         } else {
-            // 上游握手微秒延迟中，先入早鸟缓冲队列，绝不丢弃主人声音！
+            // 上游握手微秒延迟中，先入早鸟缓冲队列
             ConcurrentLinkedQueue<Buffer> earlyQueue = earlyAudioBuffer.get(session.sessionId());
             if (earlyQueue != null) {
                 earlyQueue.add(pcmChunk);
@@ -284,7 +292,10 @@ public class LiveWebSocketGateway {
         String reason = json.getString("reason", "user_hangup");
 
         LOG.infof("Client requested hangup for session %s, reason=%s", sessionId, reason);
-        conn.closeAndAwait(new CloseReason(CLOSE_NORMAL, reason));
+        conn.close(new CloseReason(CLOSE_NORMAL, reason)).subscribe().with(
+                v -> {},
+                err -> LOG.debugf("Hangup close error: %s", err.getMessage())
+        );
     }
 
     /**
@@ -322,7 +333,7 @@ public class LiveWebSocketGateway {
     }
 
     /**
-     * 安全序列化并异步下发 JSON 文本帧 (原生 Vert.x JsonObject 零反射直推).
+     * 安全序列化并异步下发 JSON 文本帧.
      */
     private void sendJson(WebSocketConnection conn, JsonObject json) {
         if (!conn.isClosed()) {
