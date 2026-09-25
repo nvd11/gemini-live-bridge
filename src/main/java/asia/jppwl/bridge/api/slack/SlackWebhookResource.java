@@ -20,7 +20,7 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
 /**
- * Slack Slash Command ({@code /call}) 控制器.
+ * Slack Slash Command ({@code /call} 或 {@code /callu}) 控制器.
  *
  * <p>响应 Slack 指令，在 3000ms 限制内快速签发短期 Token 并返回 Block Kit 交互卡片。
  */
@@ -40,7 +40,7 @@ public class SlackWebhookResource {
     }
 
     /**
-     * 响应 Slack Slash Command (/call).
+     * 响应 Slack Slash Command (/call 或 /callu).
      */
     @POST
     @Path("/command")
@@ -63,7 +63,7 @@ public class SlackWebhookResource {
         // 2. 组装 H5 电话进入链接
         String callUrl = config.publicBaseUrl() + "/call?token=" + session.ephemeralToken();
 
-        // 3. 构建 Slack Block Kit 富文本交互卡片
+        // 3. 构建 Slack 兼容性 Block Kit 富文本交互卡片 (携带顶级 text 降级提示)
         Map<String, Object> headerBlock = Map.of(
                 "type", "header",
                 "text", Map.of("type", "plain_text", "text", "🎙️ Hebe 实时语音连线", "emoji", true)
@@ -71,7 +71,7 @@ public class SlackWebhookResource {
 
         Map<String, Object> sectionBlock = Map.of(
                 "type", "section",
-                "text", Map.of("type", "mrkdwn", "text", "主人，全双工语音通道已为您就绪！点击下方按钮即可进入低延迟对讲界面：")
+                "text", Map.of("type", "mrkdwn", "text", "主人，全双工语音通道已为您就绪！点击下方按钮或直接访问链接进入通话：\n<" + callUrl + "|👉 点击直接进入通话网页>")
         );
 
         Map<String, Object> actionBlock = Map.of(
@@ -96,9 +96,12 @@ public class SlackWebhookResource {
 
         Map<String, Object> responsePayload = Map.of(
                 "response_type", "ephemeral",
+                "text", "🎙️ Hebe 实时语音连线已就绪：" + callUrl,
                 "blocks", List.of(headerBlock, sectionBlock, actionBlock, contextBlock)
         );
 
-        return Response.ok(responsePayload).build();
+        return Response.ok(responsePayload)
+                .type(MediaType.APPLICATION_JSON_TYPE.withCharset("UTF-8"))
+                .build();
     }
 }
