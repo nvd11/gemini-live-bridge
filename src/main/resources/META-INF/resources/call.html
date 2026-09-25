@@ -302,7 +302,16 @@
         audioContext = new (window.AudioContext || window.webkitAudioContext)();
         await audioContext.resume();
 
-        // 2. 获取麦克风 (带硬件回声消除与降噪)
+        // 2. 加载现代 AudioWorklet 采样处理器
+        let workletLoaded = false;
+        try {
+          await audioContext.audioWorklet.addModule('/audio-processor.js');
+          workletLoaded = true;
+        } catch (e) {
+          console.warn('AudioWorklet load failed, falling back:', e);
+        }
+
+        // 3. 获取麦克风 (带硬件回声消除与降噪)
         mediaStream = await navigator.mediaDevices.getUserMedia({
           audio: {
             channelCount: 1,
@@ -313,7 +322,7 @@
           video: false
         });
 
-        // 3. 建立 WSS 连接
+        // 4. 建立 WSS 连接
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const wsUrl = `${protocol}//${window.location.host}/ws/live/${token}`;
         
@@ -327,7 +336,7 @@
           statusDesc.textContent = '可以开始说话了，请对着麦克风发声';
           inputBar.style.display = 'flex';
           renderInCallControls();
-          startAudioRecordingWorklet();
+          startAudioCapture(workletLoaded);
           startHeartbeat();
         };
 
@@ -358,11 +367,11 @@
       }
     }
 
-    // 麦克风音频采集
-    function startAudioRecordingWorklet() {
+    // 严密 3200 字节帧对齐的音频捕获流水线
+    function startAudioCapture(useWorklet) {
       const source = audioContext.createMediaStreamSource(mediaStream);
 
-      // 创建音量感知分析节点
+      // 能量分析器
       const analyser = audioContext.createAnalyser();
       analyser.fftSize = 256;
       source.connect(analyser);
@@ -382,25 +391,44 @@
         debugBar.textContent = `上行: ${uploadedChunksCount} 帧 | 下行: ${downloadedBytesCount} 字节 | 麦克风能量: ${avg}`;
       }, 100);
 
-      // ScriptProcessor 降采样为 16kHz
-      const bufferSize = 4096;
-      const inputSampleRate = audioContext.sampleRate;
-      const processor = audioContext.createScriptProcessor(bufferSize, 1, 1);
+      if (useWorklet) {
+        audioWorkletNode = new AudioWorkletNode(audioContext, 'audio-input-processor');
+        audioWorkletNode.port.onmessage = (e) => {
+          if (isMuted || !ws || ws.readyState !== WebSocket.OPEN) return;
+          ws.send(e.data); // 精准 3200 字节 16kHz PCM Buffer
+          uploadedChunksCount++;
+        };
+        source.connect(audioWorkletNode);
+      } else {
+        // 兼容模式：带缓冲凑齐 1600 个采样点 (3200 字节) 再推送
+        const bufferSize = 4096;
+        const inputSampleRate = audioContext.sampleRate;
+        const processor = audioContext.createScriptProcessor(bufferSize, 1, 1);
+        let pcmAccumulator = new Int16Array(1600);
+        let accumulatedCount = 0;
 
-      source.connect(processor);
-      processor.connect(audioContext.destination);
+        source.connect(processor);
+        processor.connect(audioContext.destination);
 
-      processor.onaudioprocess = (e) => {
-        if (isMuted || !ws || ws.readyState !== WebSocket.OPEN) return;
-        const inputData = e.inputBuffer.getChannelData(0);
+        processor.onaudioprocess = (e) => {
+          if (isMuted || !ws || ws.readyState !== WebSocket.OPEN) return;
+          const inputData = e.inputBuffer.getChannelData(0);
+          const downsampled = downsampleBuffer(inputData, inputSampleRate, 16000);
+          const pcm16 = convertFloatTo16BitPCM(downsampled);
+          const pcm16Arr = new Int16Array(pcm16);
 
-        const downsampled = downsampleBuffer(inputData, inputSampleRate, 16000);
-        const pcm16 = convertFloatTo16BitPCM(downsampled);
-
-        ws.send(pcm16);
-        uploadedChunksCount++;
-      };
-      audioWorkletNode = processor;
+          for (let i = 0; i < pcm16Arr.length; i++) {
+            pcmAccumulator[accumulatedCount++] = pcm16Arr[i];
+            if (accumulatedCount >= 1600) {
+              const outBuffer = pcmAccumulator.buffer.slice(0);
+              ws.send(outBuffer);
+              uploadedChunksCount++;
+              accumulatedCount = 0;
+            }
+          }
+        };
+        audioWorkletNode = processor;
+      }
     }
 
     // 24kHz PCM 下行音频平滑播放

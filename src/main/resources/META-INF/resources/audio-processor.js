@@ -1,8 +1,11 @@
-// audio-processor.js - AudioWorklet 纯原生 16kHz PCM 音频采集处理器
+// audio-processor.js - AudioWorklet 纯原生 16kHz PCM 音频采集处理器 (严密 3200 字节帧对齐)
 class AudioInputProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
-    this.buffer = new Float32Array(0);
+    // 目标 1600 个采样点 (100ms * 16kHz) = 3200 字节
+    this.TARGET_CHUNK_SAMPLES = 1600;
+    this.pcmAccumulator = new Int16Array(this.TARGET_CHUNK_SAMPLES);
+    this.accumulatedSamples = 0;
   }
 
   process(inputs, outputs, parameters) {
@@ -10,30 +13,35 @@ class AudioInputProcessor extends AudioWorkletProcessor {
     if (!input || !input[0]) return true;
 
     const channelData = input[0];
-    
-    // 降采样为 16kHz
-    const sampleRateRatio = sampleRate / 16000;
-    const newLength = Math.round(channelData.length / sampleRateRatio);
-    const pcm16 = new Int16Array(newLength);
+    const inputSampleRate = sampleRate; // 浏览器环境物理采样率 (如 48000)
+    const targetSampleRate = 16000;
+    const ratio = inputSampleRate / targetSampleRate;
 
-    let offsetResult = 0;
-    let offsetBuffer = 0;
-    while (offsetResult < newLength) {
-      const nextOffsetBuffer = Math.round((offsetResult + 1) * sampleRateRatio);
-      let accum = 0, count = 0;
-      for (let i = offsetBuffer; i < nextOffsetBuffer && i < channelData.length; i++) {
-        accum += channelData[i];
+    // 线性均值降采样
+    const downsampledLength = Math.floor(channelData.length / ratio);
+    for (let i = 0; i < downsampledLength; i++) {
+      const start = Math.floor(i * ratio);
+      const end = Math.floor((i + 1) * ratio);
+      let sum = 0;
+      let count = 0;
+      for (let j = start; j < end && j < channelData.length; j++) {
+        sum += channelData[j];
         count++;
       }
-      const sample = count > 0 ? accum / count : 0;
-      const s = Math.max(-1, Math.min(1, sample));
-      pcm16[offsetResult] = s < 0 ? s * 0x8000 : s * 0x7FFF;
-      offsetResult++;
-      offsetBuffer = nextOffsetBuffer;
+      const avg = count > 0 ? sum / count : 0;
+      const s = Math.max(-1, Math.min(1, avg));
+      const int16Val = s < 0 ? s * 0x8000 : s * 0x7FFF;
+
+      this.pcmAccumulator[this.accumulatedSamples++] = int16Val;
+
+      // 只要凑齐严密的 1600 个采样点 (3200 字节 / 100ms)，立刻打包推往主线程！
+      if (this.accumulatedSamples >= this.TARGET_CHUNK_SAMPLES) {
+        const outBuffer = this.pcmAccumulator.buffer.slice(0);
+        this.port.postMessage(outBuffer, [outBuffer]);
+        this.accumulatedSamples = 0;
+      }
     }
 
-    // 通过端口向主线程推送处理好的 16kHz PCM Buffer
-    this.port.postMessage(pcm16.buffer, [pcm16.buffer]);
     return true;
   }
 }
