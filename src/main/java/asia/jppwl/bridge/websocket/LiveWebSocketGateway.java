@@ -2,6 +2,7 @@ package asia.jppwl.bridge.websocket;
 
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ConcurrentMap;
 
 import org.jboss.logging.Logger;
@@ -28,6 +29,8 @@ import jakarta.inject.Inject;
 
 /**
  * 客户端全双工 WebSocket 实时接入网关.
+ *
+ * <p>具备上游连接就绪前缓冲机制 (Early Pre-Buffer)，绝不丢弃用户开场白哪怕一个 PCM 音频字节！
  */
 @WebSocket(path = "/ws/live/{token}")
 @ApplicationScoped
@@ -44,6 +47,9 @@ public class LiveWebSocketGateway {
 
     /** 会话 ID 到上游 GeminiLiveSession 的映射 */
     private final ConcurrentMap<String, GeminiLiveSession> upstreamSessionMap = new ConcurrentHashMap<>();
+
+    /** 在上游 Google WSS 就绪前暂存早期客户端音频分片的缓冲队列 */
+    private final ConcurrentMap<String, ConcurrentLinkedQueue<Buffer>> earlyAudioBuffer = new ConcurrentHashMap<>();
 
     private final SessionManager sessionManager;
     private final BargeInController bargeInController;
@@ -77,6 +83,7 @@ public class LiveWebSocketGateway {
 
         CallSession session = sessionOpt.get();
         connectionSessionMap.put(conn.id(), session);
+        earlyAudioBuffer.put(session.sessionId(), new ConcurrentLinkedQueue<>());
 
         // 2. 原生构造下发 session.ready 欢迎与音频规格声明帧
         JsonObject readyJson = new JsonObject()
@@ -143,6 +150,19 @@ public class LiveWebSocketGateway {
                         upstreamSession -> {
                             upstreamSessionMap.put(session.sessionId(), upstreamSession);
                             LOG.infof("Google Gemini Live upstream channel established for session %s", session.sessionId());
+
+                            // 将早前积攒的开场音频包一股脑儿全部安全补发给 Google
+                            ConcurrentLinkedQueue<Buffer> earlyQueue = earlyAudioBuffer.remove(session.sessionId());
+                            if (earlyQueue != null && !earlyQueue.isEmpty()) {
+                                int count = 0;
+                                Buffer earlyChunk;
+                                while ((earlyChunk = earlyQueue.poll()) != null) {
+                                    upstreamSession.sendAudioChunk(earlyChunk);
+                                    count++;
+                                }
+                                LOG.infof("Flushed %d early buffered audio chunks to Google Live API for session %s",
+                                        count, session.sessionId());
+                            }
                         },
                         err -> {
                             LOG.errorf(err, "Failed to connect to Google Live API for session %s", session.sessionId());
@@ -166,15 +186,16 @@ public class LiveWebSocketGateway {
         // 累加上行音频字节数 (统计计费与监控指标)
         session.recordUploadBytes(pcmChunk.length());
 
-        // 零拷贝直推上游 Google Gemini Live WebSocket 管道
         GeminiLiveSession upstream = upstreamSessionMap.get(session.sessionId());
         if (upstream != null && upstream.isAlive()) {
+            // 上游已就绪，零拷贝直推
             upstream.sendAudioChunk(pcmChunk);
-            LOG.infof("Relayed %d bytes of client audio to Google Live API for session %s",
-                    pcmChunk.length(), session.sessionId());
         } else {
-            LOG.warnf("Upstream channel not ready for session %s, dropping %d bytes",
-                    session.sessionId(), pcmChunk.length());
+            // 上游握手微秒延迟中，先入早鸟缓冲队列，绝不丢弃主人声音！
+            ConcurrentLinkedQueue<Buffer> earlyQueue = earlyAudioBuffer.get(session.sessionId());
+            if (earlyQueue != null) {
+                earlyQueue.add(pcmChunk);
+            }
         }
     }
 
@@ -274,6 +295,7 @@ public class LiveWebSocketGateway {
         CallSession session = connectionSessionMap.remove(conn.id());
         if (session != null) {
             String sessionId = session.sessionId();
+            earlyAudioBuffer.remove(sessionId);
 
             // 1. 关闭上游 Google Live 长连接
             GeminiLiveSession upstream = upstreamSessionMap.remove(sessionId);
@@ -300,7 +322,7 @@ public class LiveWebSocketGateway {
     }
 
     /**
-     * 安全序列化并异步下发 JSON 文本帧.
+     * 安全序列化并异步下发 JSON 文本帧 (原生 Vert.x JsonObject 零反射直推).
      */
     private void sendJson(WebSocketConnection conn, JsonObject json) {
         if (!conn.isClosed()) {
