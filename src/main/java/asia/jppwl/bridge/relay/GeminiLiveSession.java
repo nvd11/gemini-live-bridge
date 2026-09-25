@@ -146,6 +146,9 @@ public class GeminiLiveSession {
                                     Buffer audioPcm24k = GeminiMessageCodec.decodeBase64Audio(base64Audio);
                                     session.recordDownloadBytes(audioPcm24k.length());
                                     downstreamSink.sendAudioChunk(audioPcm24k);
+
+                                    // 当模型仅返回音频而无文本时，向前端同步字幕指示，让主人看得见回复！
+                                    downstreamSink.sendTranscriptDelta("model", "🎙️ [Hebe 语音流播报中...]", false);
                                     LOG.infof("Pushed %d bytes of 24k audio down to client", audioPcm24k.length());
                                 }
                             }
