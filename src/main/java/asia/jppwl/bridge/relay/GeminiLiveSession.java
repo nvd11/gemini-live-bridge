@@ -149,7 +149,7 @@ public class GeminiLiveSession {
                         for (int i = 0; i < parts.size(); i++) {
                             JsonObject part = parts.getJsonObject(i);
 
-                            // A. 提取 24kHz PCM 下行音频数据 (inlineData)
+                            // A. 提取 24kHz PCM 下行音频数据 (inlineData) 并直推播放
                             JsonObject inlineData = part.getJsonObject("inlineData");
                             if (inlineData != null) {
                                 String base64Audio = inlineData.getString("data");
@@ -157,17 +157,15 @@ public class GeminiLiveSession {
                                     Buffer audioPcm24k = GeminiMessageCodec.decodeBase64Audio(base64Audio);
                                     session.recordDownloadBytes(audioPcm24k.length());
                                     downstreamSink.sendAudioChunk(audioPcm24k);
-
-                                    downstreamSink.sendTranscriptDelta("model", "🎙️ [Hebe 语音播报中...]", false);
                                     LOG.infof("Pushed %d bytes of 24k audio down to client", audioPcm24k.length());
                                 }
                             }
 
-                            // B. 提取模型文字转写 (text)
+                            // B. 精准提取模型真实的文字内容 (text)，直接呈现到字幕框！
                             String textPart = part.getString("text");
                             if (textPart != null && !textPart.isBlank()) {
                                 downstreamSink.sendTranscriptDelta("model", textPart, false);
-                                LOG.infof("Model transcript delta: %s", textPart);
+                                LOG.infof(">>> [MODEL TEXT RECOVERY] Model transcript text delta: %s", textPart);
                             }
                         }
                     }
