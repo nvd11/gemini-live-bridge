@@ -1,0 +1,96 @@
+# =============================================================================
+# Gemini Live Bridge - HTTPRoute (Gateway API)
+#
+# 绑定主机名 voice.jppwl.asia 与 gw.jppwl.asia，接入 Kong Gateway
+# =============================================================================
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: gemini-live-bridge-route
+  namespace: gemini-bridge
+  labels:
+    app: gemini-live-bridge
+spec:
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: kong-main-gateway
+      namespace: default
+  hostnames:
+    - "voice.jppwl.asia"
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - group: ""
+          kind: Service
+          name: gemini-live-bridge
+          port: 80
+          weight: 1
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: gemini-live-bridge-gw-route
+  namespace: gemini-bridge
+  labels:
+    app: gemini-live-bridge
+spec:
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: kong-main-gateway
+      namespace: default
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /call
+      backendRefs:
+        - group: ""
+          kind: Service
+          name: gemini-live-bridge
+          port: 80
+          weight: 1
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /ws/live
+      backendRefs:
+        - group: ""
+          kind: Service
+          name: gemini-live-bridge
+          port: 80
+          weight: 1
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/v1/call
+      backendRefs:
+        - group: ""
+          kind: Service
+          name: gemini-live-bridge
+          port: 80
+          weight: 1
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/v1/feishu
+      backendRefs:
+        - group: ""
+          kind: Service
+          name: gemini-live-bridge
+          port: 80
+          weight: 1
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/v1/slack
+      backendRefs:
+        - group: ""
+          kind: Service
+          name: gemini-live-bridge
+          port: 80
+          weight: 1
