@@ -8,15 +8,6 @@ import io.vertx.core.json.JsonObject;
 
 /**
  * Google Gemini 3.8 Live API 官方双向流式协议 (Bidi WebSocket) 编解码工具.
- *
- * <p>协议规范：
- * <ul>
- *   <li>握手 Setup 帧：包含 {@code model}、{@code generationConfig} (音频模态 AUDIO+TEXT, Voice 声线)、{@code systemInstruction} 与可选的 {@code tools}；</li>
- *   <li>上行音频流：{@code realtimeInput.mediaChunks} (MIME: {@code audio/pcm;rate=16000}, Base64 负载)；</li>
- *   <li>上行文本/插话：{@code clientContent.turns}；</li>
- *   <li>上行打断信令：{@code clientContent { turnComplete: true, interrupt: true }}；</li>
- *   <li>下行模型输出：解析 {@code serverContent.modelTurn.parts} 中的音频切片与转写文本。</li>
- * </ul>
  */
 public final class GeminiMessageCodec {
 
@@ -28,12 +19,6 @@ public final class GeminiMessageCodec {
 
     /**
      * 构建握手首帧 (Bidi Setup Frame).
-     *
-     * @param modelVariant      模型名称 (如 {@code gemini-3.8-live})
-     * @param voiceName         发音人名称 (如 {@code Puck})
-     * @param systemInstruction 智能体人设提示词
-     * @param functionDecls     可选的本地工具声明列表 (JSON Schema)
-     * @return 完整的 Setup JSON 报文
      */
     public static JsonObject buildSetupFrame(
             String modelVariant,
@@ -44,9 +29,9 @@ public final class GeminiMessageCodec {
         JsonObject setup = new JsonObject();
         setup.put("model", "models/" + (modelVariant != null ? modelVariant : "gemini-3.8-live"));
 
-        // 1. 生成参数配置 (强制请求 AUDIO + TEXT 模态，指定 Voice)
+        // 1. 生成参数配置 (强制请求 AUDIO 模态，指定 Voice)
         JsonObject generationConfig = new JsonObject();
-        generationConfig.put("responseModalities", new JsonArray().add("AUDIO").add("TEXT"));
+        generationConfig.put("responseModalities", new JsonArray().add("AUDIO"));
 
         if (voiceName != null && !voiceName.isBlank()) {
             JsonObject speechConfig = new JsonObject();
@@ -75,9 +60,6 @@ public final class GeminiMessageCodec {
 
     /**
      * 将客户端 16kHz PCM 音频切片编码为上行推流帧 (realtimeInput).
-     *
-     * @param pcm16kChunk 16kHz, 16-bit, Mono PCM Buffer
-     * @return 符合 Google 规范的 JSON 文本帧
      */
     public static JsonObject buildAudioInputFrame(Buffer pcm16kChunk) {
         String base64Audio = B64_ENCODER.encodeToString(pcm16kChunk.getBytes());
@@ -91,9 +73,6 @@ public final class GeminiMessageCodec {
 
     /**
      * 将客户端文本插话编码为上行输入帧 (clientContent).
-     *
-     * @param text 用户输入的辅助文本或指令
-     * @return 符合 Google 规范的 JSON 文本帧
      */
     public static JsonObject buildTextInputFrame(String text) {
         JsonObject part = new JsonObject().put("text", text != null ? text : "");
@@ -117,10 +96,6 @@ public final class GeminiMessageCodec {
 
     /**
      * 构建 Function Calling 工具执行结果回填帧 (toolResponse).
-     *
-     * @param callId 调用的 Call ID
-     * @param output 业务工具执行返回的 JSON 结果
-     * @return 回填给模型的 toolResponse 帧
      */
     public static JsonObject buildToolResponseFrame(String callId, JsonObject output) {
         JsonObject responseObj = new JsonObject();
