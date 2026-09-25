@@ -118,7 +118,7 @@
     .transcript-box {
       width: 100%;
       max-width: 520px;
-      height: 180px;
+      height: 200px;
       background: var(--card-bg);
       border: 1px solid #30363d;
       border-radius: 12px;
@@ -139,6 +139,10 @@
 
     .transcript-msg.user {
       color: #3fb950;
+      background: rgba(63, 185, 80, 0.1);
+      padding: 0.4rem 0.6rem;
+      border-radius: 8px;
+      border-left: 3px solid #3fb950;
     }
 
     .transcript-msg.model {
@@ -249,7 +253,7 @@
   <div class="debug-bar" id="debugBar">上行: 0 帧 | 下行: 0 字节 | 麦克风能量: 0</div>
 
   <div class="transcript-box" id="transcriptBox">
-    <div class="transcript-msg model">💬 欢迎主人，连接后可随时开口对话，支持随时插话打断。</div>
+    <div class="transcript-msg model">💬 欢迎主人，连接后可随时开口对话，屏幕会同步显示双向文字。</div>
   </div>
 
   <div class="input-bar" id="inputBar" style="display: none;">
@@ -268,16 +272,16 @@
     let audioContext = null;
     let mediaStream = null;
     let audioWorkletNode = null;
+    let speechRecognition = null;
     let pingInterval = null;
     let isMuted = false;
     let uploadedChunksCount = 0;
     let downloadedBytesCount = 0;
     let nextPlayTime = 0;
 
-    // 智能断句 VAD 状态机
     let isSpeaking = false;
     let silenceStartTimestamp = 0;
-    const SILENCE_THRESHOLD_MS = 600; // 停顿 600 毫秒判定主人说完
+    const SILENCE_THRESHOLD_MS = 600;
 
     const urlParams = new URLSearchParams(window.location.search);
     const token = urlParams.get('token');
@@ -321,6 +325,9 @@
           video: false
         });
 
+        // 🌟 启用浏览器原生 SpeechRecognition，实时把主人说的话实时打印到屏幕上！
+        initLocalSpeechRecognition();
+
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const wsUrl = `${protocol}//${window.location.host}/ws/live/${token}`;
         
@@ -331,7 +338,7 @@
         ws.onopen = () => {
           statusBadge.textContent = '通话中 (全双工)';
           statusBadge.style.color = 'var(--success)';
-          statusDesc.textContent = '可以开始说话了，请对着麦克风发声';
+          statusDesc.textContent = '可以开始说话了，屏幕会实时呈现您的语音文字';
           inputBar.style.display = 'flex';
           renderInCallControls();
           startAudioCapture(workletLoaded);
@@ -365,10 +372,68 @@
       }
     }
 
+    // 浏览器原生实时语音转写 (Web Speech API)
+    function initLocalSpeechRecognition() {
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SpeechRecognition) {
+        console.warn('Web Speech Recognition not supported in this browser');
+        return;
+      }
+
+      speechRecognition = new SpeechRecognition();
+      speechRecognition.continuous = true;
+      speechRecognition.interimResults = true;
+      speechRecognition.lang = 'zh-CN';
+
+      let currentTranscriptElement = null;
+
+      speechRecognition.onresult = (event) => {
+        let interimText = '';
+        let finalText = '';
+
+        for (let i = event.resultIndex; i < event.results.length; ++i) {
+          if (event.results[i].isFinal) {
+            finalText += event.results[i][0].transcript;
+          } else {
+            interimText += event.results[i][0].transcript;
+          }
+        }
+
+        const textToShow = finalText || interimText;
+        if (textToShow) {
+          if (!currentTranscriptElement) {
+            currentTranscriptElement = document.createElement('div');
+            currentTranscriptElement.className = 'transcript-msg user';
+            transcriptBox.appendChild(currentTranscriptElement);
+          }
+          currentTranscriptElement.textContent = `我: ${textToShow}`;
+          transcriptBox.scrollTop = transcriptBox.scrollHeight;
+
+          if (finalText) {
+            currentTranscriptElement = null;
+          }
+        }
+      };
+
+      speechRecognition.onerror = (e) => {
+        console.warn('SpeechRecognition error:', e.error);
+      };
+
+      speechRecognition.onend = () => {
+        // 持续常驻监听
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          try { speechRecognition.start(); } catch (e) {}
+        }
+      };
+
+      try {
+        speechRecognition.start();
+      } catch (e) {}
+    }
+
     function startAudioCapture(useWorklet) {
       const source = audioContext.createMediaStreamSource(mediaStream);
 
-      // 能量分析器
       const analyser = audioContext.createAnalyser();
       analyser.fftSize = 256;
       source.connect(analyser);
@@ -392,7 +457,6 @@
             if (silenceStartTimestamp === 0) {
               silenceStartTimestamp = now;
             } else if (now - silenceStartTimestamp >= SILENCE_THRESHOLD_MS) {
-              // 主人停顿超过 600ms，触发回合结束信令，催促模型答复！
               isSpeaking = false;
               silenceStartTimestamp = 0;
               triggerTurnComplete();
@@ -443,12 +507,10 @@
 
     function triggerTurnComplete() {
       if (ws && ws.readyState === WebSocket.OPEN) {
-        console.log('User stopped speaking, sending turn_complete signal');
         ws.send(JSON.stringify({ event: 'client.turn_complete', timestamp: Date.now() }));
       }
     }
 
-    // 24kHz PCM 下行音频平滑播放
     function handleServerAudioChunk(arrayBuffer) {
       downloadedBytesCount += arrayBuffer.byteLength;
       debugBar.textContent = `上行: ${uploadedChunksCount} 帧 | 下行: ${downloadedBytesCount} 字节`;
@@ -549,6 +611,9 @@
 
     function cleanup() {
       if (pingInterval) clearInterval(pingInterval);
+      if (speechRecognition) {
+        try { speechRecognition.stop(); } catch (e) {}
+      }
       if (mediaStream) mediaStream.getTracks().forEach(t => t.stop());
       if (audioWorkletNode) {
         try { audioWorkletNode.disconnect(); } catch (e) {}
