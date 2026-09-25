@@ -19,6 +19,9 @@ public final class GeminiMessageCodec {
 
     /**
      * 构建握手首帧 (Bidi Setup Frame).
+     *
+     * <p>特别说明：Google Live 官方协议支持通过 outputAudioConfig 与 responseModalities
+     * 同时下发 24kHz 音频与文本转写，若模型生成语音，其对应的字幕转写也将一并送达。
      */
     public static JsonObject buildSetupFrame(
             String modelVariant,
@@ -29,9 +32,9 @@ public final class GeminiMessageCodec {
         JsonObject setup = new JsonObject();
         setup.put("model", "models/" + (modelVariant != null ? modelVariant : "gemini-3.8-live"));
 
-        // 1. 生成参数配置 (强制请求 AUDIO 模态，指定 Voice)
+        // 1. 生成参数配置 (请求 AUDIO + TEXT 模态)
         JsonObject generationConfig = new JsonObject();
-        generationConfig.put("responseModalities", new JsonArray().add("AUDIO"));
+        generationConfig.put("responseModalities", new JsonArray().add("AUDIO").add("TEXT"));
 
         if (voiceName != null && !voiceName.isBlank()) {
             JsonObject speechConfig = new JsonObject();

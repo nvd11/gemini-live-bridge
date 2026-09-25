@@ -61,7 +61,6 @@
       margin-top: 0.5rem;
     }
 
-    /* 动态呼吸球体与波形视觉 */
     .visualizer-container {
       position: relative;
       width: 220px;
@@ -69,7 +68,7 @@
       display: flex;
       align-items: center;
       justify-content: center;
-      margin: 2rem 0;
+      margin: 1.5rem 0;
     }
 
     .orb {
@@ -103,26 +102,40 @@
       100% { transform: scale(1.15); }
     }
 
+    .status-text {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      margin-top: -0.5rem;
+    }
+
+    .debug-bar {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      margin-top: 0.2rem;
+      font-family: monospace;
+    }
+
     /* 实时双向字幕滚动区 */
     .transcript-box {
       width: 100%;
-      max-width: 480px;
-      height: 140px;
+      max-width: 520px;
+      height: 180px;
       background: var(--card-bg);
       border: 1px solid #30363d;
       border-radius: 12px;
       padding: 1rem;
       overflow-y: auto;
-      font-size: 0.9rem;
+      font-size: 0.95rem;
       line-height: 1.5;
       display: flex;
       flex-direction: column;
-      gap: 0.5rem;
-      mask-image: linear-gradient(to bottom, transparent 0%, black 15%);
+      gap: 0.6rem;
+      mask-image: linear-gradient(to bottom, transparent 0%, black 10%);
     }
 
     .transcript-msg {
       animation: fadeIn 0.3s ease-out;
+      word-break: break-word;
     }
 
     .transcript-msg.user {
@@ -130,12 +143,45 @@
     }
 
     .transcript-msg.model {
-      color: var(--text);
+      color: #f0f6fc;
+      background: rgba(163, 113, 247, 0.1);
+      padding: 0.4rem 0.6rem;
+      border-radius: 8px;
+      border-left: 3px solid #8957e5;
     }
 
     @keyframes fadeIn {
       from { opacity: 0; transform: translateY(6px); }
       to { opacity: 1; transform: translateY(0); }
+    }
+
+    /* 文字输入兜底测试栏 */
+    .input-bar {
+      width: 100%;
+      max-width: 520px;
+      display: flex;
+      gap: 0.5rem;
+      margin: 0.5rem 0;
+    }
+
+    .input-bar input {
+      flex: 1;
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 8px;
+      padding: 0.6rem 0.8rem;
+      color: var(--text);
+      font-size: 0.9rem;
+      outline: none;
+    }
+
+    .input-bar button {
+      background: #238636;
+      color: white;
+      border: none;
+      border-radius: 8px;
+      padding: 0 1rem;
+      cursor: pointer;
     }
 
     /* 底部控制按钮 */
@@ -189,19 +235,6 @@
       color: white;
       border-color: #f85149;
     }
-
-    .status-text {
-      font-size: 0.85rem;
-      color: var(--text-muted);
-      margin-top: -1rem;
-    }
-
-    .debug-bar {
-      font-size: 0.75rem;
-      color: var(--text-muted);
-      margin-top: 0.5rem;
-      font-family: monospace;
-    }
   </style>
 </head>
 <body>
@@ -216,10 +249,15 @@
   </div>
 
   <div class="status-text" id="statusDesc">点击下方绿色按钮立即接通</div>
-  <div class="debug-bar" id="debugBar">上行: 0 帧 | 音量: 0%</div>
+  <div class="debug-bar" id="debugBar">上行: 0 帧 | 下行: 0 字节 | 麦克风能量: 0</div>
 
   <div class="transcript-box" id="transcriptBox">
     <div class="transcript-msg model">💬 欢迎主人，连接后可随时开口对话，支持随时插话打断。</div>
+  </div>
+
+  <div class="input-bar" id="inputBar" style="display: none;">
+    <input type="text" id="textPromptInput" placeholder="也可以在这里直接敲文字发送给 Hebe..." onkeydown="if(event.key==='Enter') sendManualText()">
+    <button onclick="sendManualText()">发送</button>
   </div>
 
   <div class="controls" id="controlsArea">
@@ -236,6 +274,7 @@
     let pingInterval = null;
     let isMuted = false;
     let uploadedChunksCount = 0;
+    let downloadedBytesCount = 0;
     let nextPlayTime = 0;
 
     const urlParams = new URLSearchParams(window.location.search);
@@ -247,6 +286,7 @@
     const transcriptBox = document.getElementById('transcriptBox');
     const controlsArea = document.getElementById('controlsArea');
     const debugBar = document.getElementById('debugBar');
+    const inputBar = document.getElementById('inputBar');
 
     async function startCall() {
       if (!token) {
@@ -262,14 +302,7 @@
         audioContext = new (window.AudioContext || window.webkitAudioContext)();
         await audioContext.resume();
 
-        // 2. 加载现代 AudioWorklet 采集处理器
-        try {
-          await audioContext.audioWorklet.addModule('/audio-processor.js');
-        } catch (e) {
-          console.warn('AudioWorklet module load fallback:', e);
-        }
-
-        // 3. 获取麦克风 (带硬件回声消除与降噪)
+        // 2. 获取麦克风 (带硬件回声消除与降噪)
         mediaStream = await navigator.mediaDevices.getUserMedia({
           audio: {
             channelCount: 1,
@@ -280,7 +313,7 @@
           video: false
         });
 
-        // 4. 建立 WSS 连接
+        // 3. 建立 WSS 连接
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const wsUrl = `${protocol}//${window.location.host}/ws/live/${token}`;
         
@@ -292,6 +325,7 @@
           statusBadge.textContent = '通话中 (全双工)';
           statusBadge.style.color = 'var(--success)';
           statusDesc.textContent = '可以开始说话了，请对着麦克风发声';
+          inputBar.style.display = 'flex';
           renderInCallControls();
           startAudioRecordingWorklet();
           startHeartbeat();
@@ -324,7 +358,7 @@
       }
     }
 
-    // 采用标准 AudioWorklet 或 ScriptProcessor 采集推流
+    // 麦克风音频采集
     function startAudioRecordingWorklet() {
       const source = audioContext.createMediaStreamSource(mediaStream);
 
@@ -345,10 +379,10 @@
         } else {
           orbVisualizer.classList.remove('user-speaking');
         }
-        debugBar.textContent = `上行: ${uploadedChunksCount} 帧 | 能量: ${avg}`;
+        debugBar.textContent = `上行: ${uploadedChunksCount} 帧 | 下行: ${downloadedBytesCount} 字节 | 麦克风能量: ${avg}`;
       }, 100);
 
-      // 回退与兼容处理：ScriptProcessor
+      // ScriptProcessor 降采样为 16kHz
       const bufferSize = 4096;
       const inputSampleRate = audioContext.sampleRate;
       const processor = audioContext.createScriptProcessor(bufferSize, 1, 1);
@@ -360,7 +394,6 @@
         if (isMuted || !ws || ws.readyState !== WebSocket.OPEN) return;
         const inputData = e.inputBuffer.getChannelData(0);
 
-        // 重采样为 16kHz
         const downsampled = downsampleBuffer(inputData, inputSampleRate, 16000);
         const pcm16 = convertFloatTo16BitPCM(downsampled);
 
@@ -370,8 +403,11 @@
       audioWorkletNode = processor;
     }
 
-    // 24kHz PCM 下行音频平滑连贯播放
+    // 24kHz PCM 下行音频平滑播放
     function handleServerAudioChunk(arrayBuffer) {
+      downloadedBytesCount += arrayBuffer.byteLength;
+      debugBar.textContent = `上行: ${uploadedChunksCount} 帧 | 下行: ${downloadedBytesCount} 字节`;
+
       if (!audioContext || audioContext.state !== 'running') return;
 
       const pcm16Data = new Int16Array(arrayBuffer);
@@ -398,6 +434,7 @@
       setTimeout(() => orbVisualizer.classList.remove('model-speaking'), audioBuffer.duration * 1000);
     }
 
+    // 实时双向文字转写流处理
     function handleServerTextMessage(jsonStr) {
       try {
         const msg = JSON.parse(jsonStr);
@@ -411,11 +448,26 @@
     }
 
     function appendTranscript(role, text) {
-      const p = document.createElement('div');
-      p.className = `transcript-msg ${role}`;
-      p.textContent = `${role === 'model' ? 'Hebe: ' : '我: '}${text}`;
-      transcriptBox.appendChild(p);
+      let lastMsg = transcriptBox.lastElementChild;
+      if (lastMsg && lastMsg.classList.contains(role) && !lastMsg.classList.contains('final')) {
+        lastMsg.textContent += text;
+      } else {
+        const p = document.createElement('div');
+        p.className = `transcript-msg ${role}`;
+        p.textContent = `${role === 'model' ? 'Hebe: ' : '我: '}${text}`;
+        transcriptBox.appendChild(p);
+      }
       transcriptBox.scrollTop = transcriptBox.scrollHeight;
+    }
+
+    function sendManualText() {
+      const input = document.getElementById('textPromptInput');
+      const text = input.value.trim();
+      if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+      appendTranscript('user', text);
+      ws.send(JSON.stringify({ event: 'client.text', text: text, timestamp: Date.now() }));
+      input.value = '';
     }
 
     function startHeartbeat() {
