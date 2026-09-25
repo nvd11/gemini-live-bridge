@@ -29,9 +29,9 @@ public final class GeminiMessageCodec {
         JsonObject setup = new JsonObject();
         setup.put("model", "models/" + (modelVariant != null ? modelVariant : "gemini-3.8-live"));
 
-        // 1. 生成参数配置 (强制请求 AUDIO 模态以激活纯语音引擎，同时附带转写配置)
+        // 1. 生成参数配置 (请求 AUDIO + TEXT 模态)
         JsonObject generationConfig = new JsonObject();
-        generationConfig.put("responseModalities", new JsonArray().add("AUDIO"));
+        generationConfig.put("responseModalities", new JsonArray().add("AUDIO").add("TEXT"));
 
         if (voiceName != null && !voiceName.isBlank()) {
             JsonObject speechConfig = new JsonObject();
@@ -60,6 +60,7 @@ public final class GeminiMessageCodec {
 
     /**
      * 将客户端 16kHz PCM 音频切片编码为上行推流帧 (realtimeInput).
+     * 符合 Google 官方标准: mimeType 必须为 audio/pcm
      */
     public static JsonObject buildAudioInputFrame(Buffer pcm16kChunk) {
         String base64Audio = B64_ENCODER.encodeToString(pcm16kChunk.getBytes());
@@ -72,7 +73,7 @@ public final class GeminiMessageCodec {
     }
 
     /**
-     * 将客户端文本插话编码为上行输入帧 (realtimeInput text 格式，实时对话通道直收).
+     * 将客户端文本插话编码为上行输入帧 (clientContent).
      */
     public static JsonObject buildTextInputFrame(String text) {
         JsonObject part = new JsonObject().put("text", text != null ? text : "");
@@ -80,7 +81,6 @@ public final class GeminiMessageCodec {
                 .put("role", "user")
                 .put("parts", new JsonArray().add(part));
 
-        // 同时支持 clientContent 与实时输入通道
         return new JsonObject().put("clientContent", new JsonObject()
                 .put("turns", new JsonArray().add(turn))
                 .put("turnComplete", true));
