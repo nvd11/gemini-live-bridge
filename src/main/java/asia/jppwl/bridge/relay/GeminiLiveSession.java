@@ -122,9 +122,6 @@ public class GeminiLiveSession {
         }
 
         String rawStr = frame.toString();
-        LOG.infof(">>> Received raw frame from Google Gemini Live (%d bytes): %s",
-                frame.length(), rawStr.length() > 300 ? rawStr.substring(0, 300) + "..." : rawStr);
-
         try {
             JsonObject json = new JsonObject(rawStr);
 
@@ -141,7 +138,17 @@ public class GeminiLiveSession {
                     downstreamSink.sendInterruptedNotification();
                 }
 
-                // 提取模型回复片段 (modelTurn)
+                // 🌟 【重中之重】提取 Google Live 官方实时转写字段 (outputTranscription)
+                JsonObject outputTranscription = serverContent.getJsonObject("outputTranscription");
+                if (outputTranscription != null) {
+                    String transcriptText = outputTranscription.getString("text");
+                    if (transcriptText != null && !transcriptText.isBlank()) {
+                        downstreamSink.sendTranscriptDelta("model", transcriptText, false);
+                        LOG.infof(">>> [TRANSCRIPTION] Output transcript: %s", transcriptText);
+                    }
+                }
+
+                // 提取模型回复音频与部件文本 (modelTurn)
                 JsonObject modelTurn = serverContent.getJsonObject("modelTurn");
                 if (modelTurn != null) {
                     JsonArray parts = modelTurn.getJsonArray("parts");
@@ -149,7 +156,7 @@ public class GeminiLiveSession {
                         for (int i = 0; i < parts.size(); i++) {
                             JsonObject part = parts.getJsonObject(i);
 
-                            // A. 提取 24kHz PCM 下行音频数据 (inlineData) 并直推播放
+                            // A. 提取 24kHz PCM 下行音频数据 (inlineData)
                             JsonObject inlineData = part.getJsonObject("inlineData");
                             if (inlineData != null) {
                                 String base64Audio = inlineData.getString("data");
@@ -157,15 +164,15 @@ public class GeminiLiveSession {
                                     Buffer audioPcm24k = GeminiMessageCodec.decodeBase64Audio(base64Audio);
                                     session.recordDownloadBytes(audioPcm24k.length());
                                     downstreamSink.sendAudioChunk(audioPcm24k);
-                                    LOG.infof("Pushed %d bytes of 24k audio down to client", audioPcm24k.length());
+                                    LOG.tracef("Pushed %d bytes of 24k audio down to client", audioPcm24k.length());
                                 }
                             }
 
-                            // B. 精准提取模型真实的文字内容 (text)，直接呈现到字幕框！
+                            // B. 备用：提取 parts 里的显式文本片段
                             String textPart = part.getString("text");
                             if (textPart != null && !textPart.isBlank()) {
                                 downstreamSink.sendTranscriptDelta("model", textPart, false);
-                                LOG.infof(">>> [MODEL TEXT RECOVERY] Model transcript text delta: %s", textPart);
+                                LOG.infof(">>> [MODEL PART TEXT] text delta: %s", textPart);
                             }
                         }
                     }
