@@ -69,6 +69,26 @@ class SessionManagerTest {
     }
 
     @Test
+    @DisplayName("测试主人专属永久 Token：无限次连线、不核销、永不被看门狗清理")
+    void shouldSupportPermanentMasterToken() {
+        String masterToken = SessionManager.MASTER_PERMANENT_TOKEN;
+
+        // 第一次连接：直接放行
+        Optional<CallSession> firstAttempt = sessionManager.validateAndConsumeToken(masterToken);
+        assertThat(firstAttempt).isPresent();
+        assertThat(firstAttempt.get().status()).isEqualTo(SessionStatus.ACTIVE);
+        assertThat(firstAttempt.get().userId()).isEqualTo("Jason");
+
+        // 第二次连接 (永久 Token 永不核销，随时可重连)：依然放行！
+        Optional<CallSession> secondAttempt = sessionManager.validateAndConsumeToken(masterToken);
+        assertThat(secondAttempt).isPresent();
+
+        // 前缀式永久 Token 也同样放行
+        Optional<CallSession> customPerm = sessionManager.validateAndConsumeToken("permanent-jason-vip");
+        assertThat(customPerm).isPresent();
+    }
+
+    @Test
     @DisplayName("测试正常挂断会话：生成结算单并从活跃索引清理")
     void shouldTerminateSessionAndGenerateSummary() {
         CreateSessionRequest req = CreateSessionRequest.of("user_jason", "slack");

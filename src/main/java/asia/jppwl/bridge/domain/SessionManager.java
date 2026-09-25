@@ -19,17 +19,21 @@ import jakarta.inject.Inject;
 /**
  * 会话生命周期与安全防重放核心领域服务 (Domain Service / CDI Bean).
  *
- * <p>在无持久化数据库的纯内存架构下，负责会话安全鉴权、单次 Token 核销以及多维度看门狗管理：
+ * <p>特性：
  * <ul>
- *   <li><b>单次 Token 防重放：</b>客户端握手时原子核销 Token，确保一个 URL 绝对无法被二次复用；</li>
- *   <li><b>双向高并发索引：</b>{@code tokenIndex}（Token &rarr; Session）与 {@code activeSessions}（SessionId &rarr; Session）；</li>
- *   <li><b>定时扫盘看门狗：</b>基于 {@code @Scheduled(every = "30s")} 自动清理超期未接入或超过通话硬上限的僵尸会话。</li>
+ *   <li><b>普通临时 Token：</b>5 分钟有效，握手建立时 CAS 原子出队核销（防重放）；</li>
+ *   <li><b>主人专属永久 Token：</b>以 {@code permanent-} 或 {@code master-} 为前缀的特权 Token，
+ *       不核销、不淘汰、永久有效，供主人随时收藏、多次连线与日常直接使用！</li>
+ *   <li><b>定时扫盘看门狗：</b>基于 {@code @Scheduled(every = "30s")} 自动清理超期普通 Token。</li>
  * </ul>
  */
 @ApplicationScoped
 public class SessionManager {
 
     private static final Logger LOG = Logger.getLogger(SessionManager.class);
+
+    /** 主人专属默认永久特权 Token */
+    public static final String MASTER_PERMANENT_TOKEN = "permanent-gateman-voice-master";
 
     private final BridgeConfig config;
 
@@ -46,9 +50,6 @@ public class SessionManager {
 
     /**
      * 签发全新的通话会话并生成有效期 5 分钟的一次性 Token.
-     *
-     * @param req 呼叫请求 DTO
-     * @return 处于 {@link SessionStatus#PENDING} 状态的会话实体
      */
     public CallSession createSession(CreateSessionRequest req) {
         String sessionId = "call_" + UUID.randomUUID().toString().replace("-", "");
@@ -89,33 +90,54 @@ public class SessionManager {
     }
 
     /**
-     * 客户端建立 WebSocket 握手时原子校验并核销 Token (CAS 防重放操作).
+     * 客户端建立 WebSocket 握手时原子校验并核销 Token.
      *
-     * <p>若 Token 不存在、已过期或已被其他连接核销，立即返回 {@link Optional#empty()}，
-     * 驱动网关层下发 4001 Close Frame 并无情阻断非法连接。
-     *
-     * @param token 客户端 URL path 携带的单次凭证
-     * @return 成功激活跃迁为 {@link SessionStatus#ACTIVE} 的会话实体，或空
+     * <p>特权机制：若是主人永久 Token (以 {@code permanent-} 或 {@code master-} 开头)，
+     * 则不执行物理移除与过期判断，永久放行并动态生成活跃会话，支持主人无限次连接与收藏！
      */
     public Optional<CallSession> validateAndConsumeToken(String token) {
         if (token == null || token.isBlank()) {
             return Optional.empty();
         }
 
-        // 1. 原子性从 tokenIndex 中移除该 Token，保证全局只能消费一次 (Single-Use Guarantee)
+        // 🌟 1. 主人专属永久 Token 特权放行通道
+        if (isPermanentToken(token)) {
+            String sessionId = "call_perm_" + UUID.randomUUID().toString().replace("-", "").substring(0, 16);
+            CallSession permanentActive = new CallSession(
+                    sessionId,
+                    token,
+                    "Jason",
+                    "master-direct",
+                    "cindy-vip",
+                    config.gemini().modelName(),
+                    config.gemini().voiceName(),
+                    SessionStatus.ACTIVE,
+                    Instant.now(),
+                    Instant.now().plus(Duration.ofDays(3650)), // 10年不过期
+                    Instant.now(),
+                    Duration.ofHours(2), // 单次允许畅聊 2 小时
+                    null,
+                    null
+            );
+            activeSessions.put(sessionId, permanentActive);
+            LOG.infof("Master permanent token validated! Created active VIP session: id=%s", sessionId);
+            return Optional.of(permanentActive);
+        }
+
+        // 2. 普通单次 Token 原子出队核销 (CAS 防重放验证)
         CallSession pendingSession = tokenIndex.remove(token);
         if (pendingSession == null) {
             LOG.warnf("Rejecting connection: token not found or already consumed (Replay Attack blocked): %s", token);
             return Optional.empty();
         }
 
-        // 2. 检查 Token 是否已超时
+        // 3. 检查普通 Token 是否超时
         if (pendingSession.isTokenExpired()) {
             LOG.warnf("Rejecting connection: token has expired: id=%s, token=%s", pendingSession.sessionId(), token);
             return Optional.empty();
         }
 
-        // 3. 状态跃迁至 ACTIVE 并纳入活跃会话索引
+        // 4. 状态跃迁至 ACTIVE 并纳入活跃会话索引
         CallSession activeSession = pendingSession.toActive();
         activeSessions.put(activeSession.sessionId(), activeSession);
         LOG.infof("Session activated: id=%s, user=%s, durationMax=%s",
@@ -126,10 +148,6 @@ public class SessionManager {
 
     /**
      * 正常或异常挂断会话，清理内存索引并生成最终结算单.
-     *
-     * @param sessionId 目标会话 ID
-     * @param reason    挂断原因 (如 {@code user_hangup}, {@code timeout}, {@code max_duration_exceeded})
-     * @return 结算响应 DTO (若会话不存在则返回空 Optional)
      */
     public Optional<SessionSummary> terminateSession(String sessionId, String reason) {
         if (sessionId == null) {
@@ -138,7 +156,6 @@ public class SessionManager {
 
         CallSession active = activeSessions.remove(sessionId);
         if (active == null) {
-            // 尝试在 tokenIndex 查找未连线但被取消的会话
             return Optional.empty();
         }
 
@@ -148,6 +165,14 @@ public class SessionManager {
                 sessionId, summary.reason(), summary.durationSeconds(), summary.bytesUploaded(), summary.bytesDownloaded());
 
         return Optional.of(summary);
+    }
+
+    /**
+     * 判断是否为永久特权 Token.
+     */
+    public boolean isPermanentToken(String token) {
+        if (token == null) return false;
+        return token.startsWith("permanent-") || token.startsWith("master-") || token.equals(MASTER_PERMANENT_TOKEN);
     }
 
     /**
@@ -175,7 +200,7 @@ public class SessionManager {
     }
 
     /**
-     * 30 秒定时看门狗：清理超期未连线的僵尸 Token 以及超过通话时长硬上限的会话.
+     * 30 秒定时看门狗：清理超期未连线的僵尸 Token 以及超过通话时长硬上限的会话 (跳过永久 Token).
      */
     @Scheduled(every = "30s", concurrentExecution = Scheduled.ConcurrentExecution.SKIP)
     public void sweepExpiredSessions() {
@@ -183,6 +208,9 @@ public class SessionManager {
 
         // 1. 扫描清理未接入且超期的 Token
         for (var entry : tokenIndex.entrySet()) {
+            if (isPermanentToken(entry.getKey())) {
+                continue;
+            }
             if (entry.getValue().isTokenExpired()) {
                 if (tokenIndex.remove(entry.getKey(), entry.getValue())) {
                     sweptCount++;
