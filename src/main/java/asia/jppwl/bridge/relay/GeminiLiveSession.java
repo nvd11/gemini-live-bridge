@@ -13,14 +13,6 @@ import io.vertx.core.json.JsonObject;
 
 /**
  * 维持与 Google Gemini Live API 专属长连接的单会话中继器 (Stateful Relay Bridge).
- *
- * <p>负责：
- * <ol>
- *   <li>发送 16kHz PCM 音频流上推；</li>
- *   <li>发送文本插话与打断控制信令；</li>
- *   <li>监听上游下推的 24kHz PCM 音频切片与转写字幕，直接分发给下游 {@link DownstreamSink}；</li>
- *   <li>监听上游下发的 {@code toolCall} 决策，动态调用本地 {@link ToolExecutionRouter} 并将结果回填模型。</li>
- * </ol>
  */
 public class GeminiLiveSession {
 
@@ -118,8 +110,17 @@ public class GeminiLiveSession {
             return;
         }
 
+        String rawStr = frame.toString();
+        LOG.infof(">>> Received raw frame from Google Gemini Live (%d bytes): %s",
+                frame.length(), rawStr.length() > 300 ? rawStr.substring(0, 300) + "..." : rawStr);
+
         try {
-            JsonObject json = new JsonObject(frame.toString());
+            JsonObject json = new JsonObject(rawStr);
+
+            // 0. 检查握手确认 (setupComplete)
+            if (json.containsKey("setupComplete")) {
+                LOG.infof("Google Gemini Live setupComplete confirmed for session %s!", session.sessionId());
+            }
 
             // 1. 检查服务端内容下发 (serverContent)
             JsonObject serverContent = json.getJsonObject("serverContent");
@@ -145,6 +146,7 @@ public class GeminiLiveSession {
                                     Buffer audioPcm24k = GeminiMessageCodec.decodeBase64Audio(base64Audio);
                                     session.recordDownloadBytes(audioPcm24k.length());
                                     downstreamSink.sendAudioChunk(audioPcm24k);
+                                    LOG.infof("Pushed %d bytes of 24k audio down to client", audioPcm24k.length());
                                 }
                             }
 
@@ -152,6 +154,7 @@ public class GeminiLiveSession {
                             String textPart = part.getString("text");
                             if (textPart != null && !textPart.isBlank()) {
                                 downstreamSink.sendTranscriptDelta("model", textPart, false);
+                                LOG.infof("Model transcript delta: %s", textPart);
                             }
                         }
                     }

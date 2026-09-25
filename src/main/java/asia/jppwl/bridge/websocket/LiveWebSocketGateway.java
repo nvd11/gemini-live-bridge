@@ -28,9 +28,6 @@ import jakarta.inject.Inject;
 
 /**
  * 客户端全双工 WebSocket 实时接入网关.
- *
- * <p>端点路径：{@code /ws/live/{token}}
- * <p>纯原生 Vert.x JsonObject 驱动，完全规避 Jackson 反射在 GraalVM Native 下的序列化陷阱。
  */
 @WebSocket(path = "/ws/live/{token}")
 @ApplicationScoped
@@ -173,6 +170,11 @@ public class LiveWebSocketGateway {
         GeminiLiveSession upstream = upstreamSessionMap.get(session.sessionId());
         if (upstream != null && upstream.isAlive()) {
             upstream.sendAudioChunk(pcmChunk);
+            LOG.infof("Relayed %d bytes of client audio to Google Live API for session %s",
+                    pcmChunk.length(), session.sessionId());
+        } else {
+            LOG.warnf("Upstream channel not ready for session %s, dropping %d bytes",
+                    session.sessionId(), pcmChunk.length());
         }
     }
 
@@ -222,16 +224,13 @@ public class LiveWebSocketGateway {
     private void handleInterrupt(WebSocketConnection conn) {
         CallSession session = connectionSessionMap.get(conn.id());
         if (session != null) {
-            // 1. 本地 Flush Jitter Buffer
             bargeInController.handleClientInterrupt(session.sessionId());
 
-            // 2. 向上游 Google 发送截断信令
             GeminiLiveSession upstream = upstreamSessionMap.get(session.sessionId());
             if (upstream != null && upstream.isAlive()) {
                 upstream.signalInterrupt();
             }
 
-            // 3. 回发打断确认帧给前端，前端重置本地 AudioWorklet 播放器
             JsonObject interrupted = new JsonObject()
                     .put("event", "server.interrupted")
                     .put("timestamp", System.currentTimeMillis());
@@ -301,7 +300,7 @@ public class LiveWebSocketGateway {
     }
 
     /**
-     * 安全序列化并异步下发 JSON 文本帧 (原生 Vert.x JsonObject 零反射直推).
+     * 安全序列化并异步下发 JSON 文本帧.
      */
     private void sendJson(WebSocketConnection conn, JsonObject json) {
         if (!conn.isClosed()) {
