@@ -116,7 +116,7 @@
       font-family: monospace;
     }
 
-    /* 320px 大尺寸字幕滚动区 */
+    /* 320px 大尺寸沉浸式字幕滚动区 */
     .transcript-box {
       width: 100%;
       max-width: 680px;
@@ -284,12 +284,12 @@
     let audioContext = null;
     let mediaStream = null;
     let audioWorkletNode = null;
+    let audioPlaybackNode = null; // 环形缓冲无缝播放器节点
     let speechRecognition = null;
     let pingInterval = null;
     let isMuted = false;
     let uploadedChunksCount = 0;
     let downloadedBytesCount = 0;
-    let nextPlayTime = 0;
 
     let isSpeaking = false;
     let silenceStartTimestamp = 0;
@@ -316,18 +316,26 @@
       statusDesc.textContent = '正在获取硬件音频授权...';
 
       try {
-        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        // 1. 初始化 24kHz 原生 AudioContext (与 Google Live 官方输出 100% 同频)
+        audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
         await audioContext.resume();
 
+        // 2. 加载两个核心 Worklet 处理器 (下行环形播放 + 上行严格采样)
         let workletLoaded = false;
         try {
+          await audioContext.audioWorklet.addModule('/audio-playback-processor.js');
           await audioContext.audioWorklet.addModule('/audio-processor.js');
           workletLoaded = true;
-          console.log('AudioWorklet module loaded successfully!');
+
+          // 挂接环形播放器到扬声器
+          audioPlaybackNode = new AudioWorkletNode(audioContext, 'audio-playback-processor');
+          audioPlaybackNode.connect(audioContext.destination);
+          console.log('AudioPlaybackProcessor initialized and connected to speakers!');
         } catch (e) {
-          console.warn('AudioWorklet load failed, falling back:', e);
+          console.warn('AudioWorklet module load error:', e);
         }
 
+        // 3. 获取麦克风 (带硬件回声消除与降噪)
         mediaStream = await navigator.mediaDevices.getUserMedia({
           audio: {
             channelCount: 1,
@@ -340,6 +348,7 @@
 
         initLocalSpeechRecognition();
 
+        // 4. 建立 WSS 连接
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const wsUrl = `${protocol}//${window.location.host}/ws/live/${token}`;
         
@@ -350,7 +359,7 @@
         ws.onopen = () => {
           statusBadge.textContent = '通话中 (全双工)';
           statusBadge.style.color = 'var(--success)';
-          statusDesc.textContent = '可以开始说话了，请对着麦克风发声';
+          statusDesc.textContent = '可以开始说话了，屏幕会实时呈现您的语音文字';
           inputBar.style.display = 'flex';
           renderInCallControls();
           startAudioCapture(workletLoaded);
@@ -419,7 +428,6 @@
 
           if (finalText) {
             currentTranscriptElement = null;
-            // 🌟 核心突破：当识别出整句语音文字时，同步以 client.text 双重打入 Google 管道，杜绝任何理解偏差！
             if (ws && ws.readyState === WebSocket.OPEN) {
               console.log('Syncing speech text to Google:', finalText);
               ws.send(JSON.stringify({ event: 'client.text', text: finalText, timestamp: Date.now() }));
@@ -523,34 +531,18 @@
       }
     }
 
+    // 24kHz PCM 下行音频流由硬件级环形缓冲无缝播放 (彻底消灭爆音与撕裂卡顿！)
     function handleServerAudioChunk(arrayBuffer) {
       downloadedBytesCount += arrayBuffer.byteLength;
       debugBar.textContent = `上行: ${uploadedChunksCount} 帧 | 下行: ${downloadedBytesCount} 字节`;
 
-      if (!audioContext || audioContext.state !== 'running') return;
-
-      const pcm16Data = new Int16Array(arrayBuffer);
-      const float32Data = new Float32Array(pcm16Data.length);
-      for (let i = 0; i < pcm16Data.length; i++) {
-        float32Data[i] = pcm16Data[i] / 32768.0;
+      if (audioPlaybackNode) {
+        // 直接将二进制切片传入 AudioWorklet 内部的环形缓冲区，由底层线程以极稳时间戳驱动播放！
+        audioPlaybackNode.port.postMessage(arrayBuffer, [arrayBuffer]);
       }
-
-      const audioBuffer = audioContext.createBuffer(1, float32Data.length, 24000);
-      audioBuffer.getChannelData(0).set(float32Data);
-
-      const bufferSource = audioContext.createBufferSource();
-      bufferSource.buffer = audioBuffer;
-      bufferSource.connect(audioContext.destination);
-
-      const currentTime = audioContext.currentTime;
-      if (nextPlayTime < currentTime) {
-        nextPlayTime = currentTime + 0.05;
-      }
-      bufferSource.start(nextPlayTime);
-      nextPlayTime += audioBuffer.duration;
 
       orbVisualizer.classList.add('model-speaking');
-      setTimeout(() => orbVisualizer.classList.remove('model-speaking'), audioBuffer.duration * 1000);
+      setTimeout(() => orbVisualizer.classList.remove('model-speaking'), 300);
     }
 
     function handleServerTextMessage(jsonStr) {
@@ -559,7 +551,9 @@
         if (msg.event === 'transcript.delta') {
           appendTranscript(msg.role, msg.delta);
         } else if (msg.event === 'server.interrupted') {
-          nextPlayTime = audioContext ? audioContext.currentTime : 0;
+          if (audioPlaybackNode) {
+            audioPlaybackNode.port.postMessage({ command: 'flush' });
+          }
           orbVisualizer.classList.remove('model-speaking');
         }
       } catch (e) {}
@@ -627,6 +621,9 @@
       if (pingInterval) clearInterval(pingInterval);
       if (speechRecognition) {
         try { speechRecognition.stop(); } catch (e) {}
+      }
+      if (audioPlaybackNode) {
+        try { audioPlaybackNode.port.postMessage({ command: 'flush' }); } catch (e) {}
       }
       if (mediaStream) mediaStream.getTracks().forEach(t => t.stop());
       if (audioWorkletNode) {
