@@ -116,7 +116,7 @@
       font-family: monospace;
     }
 
-    /* 🌟 大尺寸沉浸式字幕滚动对话区 (大幅调大面积) */
+    /* 320px 大尺寸字幕滚动区 */
     .transcript-box {
       width: 100%;
       max-width: 680px;
@@ -323,6 +323,7 @@
         try {
           await audioContext.audioWorklet.addModule('/audio-processor.js');
           workletLoaded = true;
+          console.log('AudioWorklet module loaded successfully!');
         } catch (e) {
           console.warn('AudioWorklet load failed, falling back:', e);
         }
@@ -337,7 +338,6 @@
           video: false
         });
 
-        // 启动本地原生语音听写
         initLocalSpeechRecognition();
 
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -350,7 +350,7 @@
         ws.onopen = () => {
           statusBadge.textContent = '通话中 (全双工)';
           statusBadge.style.color = 'var(--success)';
-          statusDesc.textContent = '可以开始说话了，屏幕会实时呈现您的语音文字';
+          statusDesc.textContent = '可以开始说话了，请对着麦克风发声';
           inputBar.style.display = 'flex';
           renderInCallControls();
           startAudioCapture(workletLoaded);
@@ -419,6 +419,11 @@
 
           if (finalText) {
             currentTranscriptElement = null;
+            // 🌟 核心突破：当识别出整句语音文字时，同步以 client.text 双重打入 Google 管道，杜绝任何理解偏差！
+            if (ws && ws.readyState === WebSocket.OPEN) {
+              console.log('Syncing speech text to Google:', finalText);
+              ws.send(JSON.stringify({ event: 'client.text', text: finalText, timestamp: Date.now() }));
+            }
           }
         }
       };
@@ -477,7 +482,7 @@
         audioWorkletNode = new AudioWorkletNode(audioContext, 'audio-input-processor');
         audioWorkletNode.port.onmessage = (e) => {
           if (isMuted || !ws || ws.readyState !== WebSocket.OPEN) return;
-          ws.send(e.data);
+          ws.send(e.data); // 精确 3200 字节 16kHz PCM Buffer
           uploadedChunksCount++;
         };
         source.connect(audioWorkletNode);
@@ -548,7 +553,6 @@
       setTimeout(() => orbVisualizer.classList.remove('model-speaking'), audioBuffer.duration * 1000);
     }
 
-    // 实时双向文字转写流处理 (精准追加文字，杜绝占位符！)
     function handleServerTextMessage(jsonStr) {
       try {
         const msg = JSON.parse(jsonStr);
@@ -565,7 +569,6 @@
       if (!text || text.trim() === '') return;
 
       let lastMsg = transcriptBox.lastElementChild;
-      // 若上一条气泡同一角色，则平滑累加追加文本
       if (lastMsg && lastMsg.classList.contains(role) && !lastMsg.classList.contains('final')) {
         lastMsg.textContent += text;
       } else {

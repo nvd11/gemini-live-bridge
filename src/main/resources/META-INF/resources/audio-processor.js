@@ -36,7 +36,8 @@ class AudioInputProcessor extends AudioWorkletProcessor {
 
       // 只要凑齐严密的 1600 个采样点 (3200 字节 / 100ms)，立刻打包推往主线程！
       if (this.accumulatedSamples >= this.TARGET_CHUNK_SAMPLES) {
-        const outBuffer = this.pcmAccumulator.buffer.slice(0);
+        // 创建精确的一维拷贝，确保 Transferable 传递无死角
+        const outBuffer = new Int16Array(this.pcmAccumulator).buffer;
         this.port.postMessage(outBuffer, [outBuffer]);
         this.accumulatedSamples = 0;
       }
