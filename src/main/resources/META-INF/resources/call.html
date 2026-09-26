@@ -116,7 +116,6 @@
       font-family: monospace;
     }
 
-    /* 320px 大尺寸沉浸式字幕滚动区 */
     .transcript-box {
       width: 100%;
       max-width: 680px;
@@ -283,13 +282,13 @@
     let ws = null;
     let audioContext = null;
     let mediaStream = null;
-    let audioWorkletNode = null;
-    let audioPlaybackNode = null; // 环形缓冲无缝播放器节点
+    let audioInputNode = null;
     let speechRecognition = null;
     let pingInterval = null;
     let isMuted = false;
     let uploadedChunksCount = 0;
     let downloadedBytesCount = 0;
+    let nextPlayTime = 0;
 
     let isSpeaking = false;
     let silenceStartTimestamp = 0;
@@ -316,26 +315,9 @@
       statusDesc.textContent = '正在获取硬件音频授权...';
 
       try {
-        // 1. 初始化 24kHz 原生 AudioContext (与 Google Live 官方输出 100% 同频)
-        audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
         await audioContext.resume();
 
-        // 2. 加载两个核心 Worklet 处理器 (下行环形播放 + 上行严格采样)
-        let workletLoaded = false;
-        try {
-          await audioContext.audioWorklet.addModule('/audio-playback-processor.js');
-          await audioContext.audioWorklet.addModule('/audio-processor.js');
-          workletLoaded = true;
-
-          // 挂接环形播放器到扬声器
-          audioPlaybackNode = new AudioWorkletNode(audioContext, 'audio-playback-processor');
-          audioPlaybackNode.connect(audioContext.destination);
-          console.log('AudioPlaybackProcessor initialized and connected to speakers!');
-        } catch (e) {
-          console.warn('AudioWorklet module load error:', e);
-        }
-
-        // 3. 获取麦克风 (带硬件回声消除与降噪)
         mediaStream = await navigator.mediaDevices.getUserMedia({
           audio: {
             channelCount: 1,
@@ -348,7 +330,6 @@
 
         initLocalSpeechRecognition();
 
-        // 4. 建立 WSS 连接
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const wsUrl = `${protocol}//${window.location.host}/ws/live/${token}`;
         
@@ -362,7 +343,7 @@
           statusDesc.textContent = '可以开始说话了，屏幕会实时呈现您的语音文字';
           inputBar.style.display = 'flex';
           renderInCallControls();
-          startAudioCapture(workletLoaded);
+          startAudioCapture();
           startHeartbeat();
         };
 
@@ -451,7 +432,7 @@
       } catch (e) {}
     }
 
-    function startAudioCapture(useWorklet) {
+    function startAudioCapture() {
       const source = audioContext.createMediaStreamSource(mediaStream);
 
       const analyser = audioContext.createAnalyser();
@@ -486,43 +467,34 @@
         debugBar.textContent = `上行: ${uploadedChunksCount} 帧 | 下行: ${downloadedBytesCount} 字节 | 麦克风能量: ${avg}`;
       }, 100);
 
-      if (useWorklet) {
-        audioWorkletNode = new AudioWorkletNode(audioContext, 'audio-input-processor');
-        audioWorkletNode.port.onmessage = (e) => {
-          if (isMuted || !ws || ws.readyState !== WebSocket.OPEN) return;
-          ws.send(e.data); // 精确 3200 字节 16kHz PCM Buffer
-          uploadedChunksCount++;
-        };
-        source.connect(audioWorkletNode);
-      } else {
-        const bufferSize = 4096;
-        const inputSampleRate = audioContext.sampleRate;
-        const processor = audioContext.createScriptProcessor(bufferSize, 1, 1);
-        let pcmAccumulator = new Int16Array(1600);
-        let accumulatedCount = 0;
+      // 高效 ScriptProcessor：精准凑齐 1600 采样点 (3200 字节 / 100ms) 规整推流
+      const bufferSize = 4096;
+      const inputSampleRate = audioContext.sampleRate;
+      const processor = audioContext.createScriptProcessor(bufferSize, 1, 1);
+      let pcmAccumulator = new Int16Array(1600);
+      let accumulatedCount = 0;
 
-        source.connect(processor);
-        processor.connect(audioContext.destination);
+      source.connect(processor);
+      processor.connect(audioContext.destination);
 
-        processor.onaudioprocess = (e) => {
-          if (isMuted || !ws || ws.readyState !== WebSocket.OPEN) return;
-          const inputData = e.inputBuffer.getChannelData(0);
-          const downsampled = downsampleBuffer(inputData, inputSampleRate, 16000);
-          const pcm16 = convertFloatTo16BitPCM(downsampled);
-          const pcm16Arr = new Int16Array(pcm16);
+      processor.onaudioprocess = (e) => {
+        if (isMuted || !ws || ws.readyState !== WebSocket.OPEN) return;
+        const inputData = e.inputBuffer.getChannelData(0);
+        const downsampled = downsampleBuffer(inputData, inputSampleRate, 16000);
+        const pcm16 = convertFloatTo16BitPCM(downsampled);
+        const pcm16Arr = new Int16Array(pcm16);
 
-          for (let i = 0; i < pcm16Arr.length; i++) {
-            pcmAccumulator[accumulatedCount++] = pcm16Arr[i];
-            if (accumulatedCount >= 1600) {
-              const outBuffer = pcmAccumulator.buffer.slice(0);
-              ws.send(outBuffer);
-              uploadedChunksCount++;
-              accumulatedCount = 0;
-            }
+        for (let i = 0; i < pcm16Arr.length; i++) {
+          pcmAccumulator[accumulatedCount++] = pcm16Arr[i];
+          if (accumulatedCount >= 1600) {
+            const outBuffer = pcmAccumulator.buffer.slice(0);
+            ws.send(outBuffer);
+            uploadedChunksCount++;
+            accumulatedCount = 0;
           }
-        };
-        audioWorkletNode = processor;
-      }
+        }
+      };
+      audioInputNode = processor;
     }
 
     function triggerTurnComplete() {
@@ -531,18 +503,36 @@
       }
     }
 
-    // 24kHz PCM 下行音频流由硬件级环形缓冲无缝播放 (彻底消灭爆音与撕裂卡顿！)
+    // 24kHz PCM 下行音频平滑播放 (使用双缓冲无缝调度)
     function handleServerAudioChunk(arrayBuffer) {
       downloadedBytesCount += arrayBuffer.byteLength;
       debugBar.textContent = `上行: ${uploadedChunksCount} 帧 | 下行: ${downloadedBytesCount} 字节`;
 
-      if (audioPlaybackNode) {
-        // 直接将二进制切片传入 AudioWorklet 内部的环形缓冲区，由底层线程以极稳时间戳驱动播放！
-        audioPlaybackNode.port.postMessage(arrayBuffer, [arrayBuffer]);
+      if (!audioContext || audioContext.state !== 'running') return;
+
+      const pcm16Data = new Int16Array(arrayBuffer);
+      const float32Data = new Float32Array(pcm16Data.length);
+      for (let i = 0; i < pcm16Data.length; i++) {
+        float32Data[i] = pcm16Data[i] / 32768.0;
       }
 
+      const audioBuffer = audioContext.createBuffer(1, float32Data.length, 24000);
+      audioBuffer.getChannelData(0).set(float32Data);
+
+      const bufferSource = audioContext.createBufferSource();
+      bufferSource.buffer = audioBuffer;
+      bufferSource.connect(audioContext.destination);
+
+      const currentTime = audioContext.currentTime;
+      // 预留 80ms 微缓冲，彻底消灭抖动
+      if (nextPlayTime < currentTime) {
+        nextPlayTime = currentTime + 0.08;
+      }
+      bufferSource.start(nextPlayTime);
+      nextPlayTime += audioBuffer.duration;
+
       orbVisualizer.classList.add('model-speaking');
-      setTimeout(() => orbVisualizer.classList.remove('model-speaking'), 300);
+      setTimeout(() => orbVisualizer.classList.remove('model-speaking'), audioBuffer.duration * 1000);
     }
 
     function handleServerTextMessage(jsonStr) {
@@ -551,9 +541,7 @@
         if (msg.event === 'transcript.delta') {
           appendTranscript(msg.role, msg.delta);
         } else if (msg.event === 'server.interrupted') {
-          if (audioPlaybackNode) {
-            audioPlaybackNode.port.postMessage({ command: 'flush' });
-          }
+          nextPlayTime = audioContext ? audioContext.currentTime : 0;
           orbVisualizer.classList.remove('model-speaking');
         }
       } catch (e) {}
@@ -622,12 +610,9 @@
       if (speechRecognition) {
         try { speechRecognition.stop(); } catch (e) {}
       }
-      if (audioPlaybackNode) {
-        try { audioPlaybackNode.port.postMessage({ command: 'flush' }); } catch (e) {}
-      }
       if (mediaStream) mediaStream.getTracks().forEach(t => t.stop());
-      if (audioWorkletNode) {
-        try { audioWorkletNode.disconnect(); } catch (e) {}
+      if (audioInputNode) {
+        try { audioInputNode.disconnect(); } catch (e) {}
       }
       if (audioContext && audioContext.state !== 'closed') audioContext.close();
     }
